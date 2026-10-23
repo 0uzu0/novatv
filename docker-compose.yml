@@ -30,6 +30,10 @@ services:
       CONFIG_URLS: ${CONFIG_URLS:-}
       # 只有启用了 docker-compose.sidecar.yml 才需要
       SPIDER_JVM_URL: ${SPIDER_JVM_URL:-}
+      # Android 侧车：手机 / TV 盒子 / redroid 的地址（局域网填 http://192.168.x.x:8899）
+      SPIDER_ANDROID_URL: ${SPIDER_ANDROID_URL:-}
+      # 侧车口令（手机端启动时填的那个），两侧车共用
+      SPIDER_TOKEN: ${SPIDER_TOKEN:-}
 
     volumes:
       # 配置解码快照 + JS 运行时模块缓存，删掉只是下次启动慢一点

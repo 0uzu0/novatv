@@ -1,0 +1,26 @@
+{
+  "from": "https://xiuxiu-pro-new.meitudata.com/posters/23a0210a87314011a88b149d6f04722e.jpg",
+  "md5": "654fb7dcb0aeaaea7dba0e662395f38e",
+  "bytes": 1449796,
+  "extractedAt": "2026-10-23T03:20:30.431Z",
+  "libs": [
+    {
+      "entry": "assets/ftyguard_v7.so",
+      "abi": "armeabi-v7a",
+      "bits": 32,
+      "bytes": 81520,
+      "out": "sidecar/android/host-apk/app/src/main/jniLibs/armeabi-v7a/libftyguard_v7.so"
+    },
+    {
+      "entry": "assets/ftyguard_v8.so",
+      "abi": "arm64-v8a",
+      "bits": 64,
+      "bytes": 102440,
+      "out": "sidecar/android/host-apk/app/src/main/jniLibs/arm64-v8a/libftyguard_v8.so"
+    }
+  ],
+  "abis": [
+    "armeabi-v7a",
+    "arm64-v8a"
+  ]
+}

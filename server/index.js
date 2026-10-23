@@ -6,6 +6,7 @@ import { ConfigStore } from './config/loader.js';
 import { createContext, adapterFor, liveAdapterFor, publicSite } from './registry.js';
 import { handleMock } from '../fixtures/mock-cms.js';
 import { http } from './util/http.js';
+import { fetchx } from './util/curl.js';
 import { capabilityMatrix } from './runtimes/index.js';
 import { engineStatus, isWarm } from './runtimes/js-rt/engine.js';
 
@@ -101,6 +102,37 @@ async function findSite(key) {
   const site = all.find((s) => s.key === key);
   if (!site) throw Object.assign(new Error(`未找到源 ${key}`), { status: 404 });
   return site;
+}
+
+/**
+ * 统一「运行时缺失」响应。
+ * 提示必须按包的真实类型给：加固包配 SPIDER_BRIDGE_URL 也没用，
+ * 说错方向比不提示更糟（用户会去折腾一个注定失败的方案）。
+ */
+async function runtimeMissing(res, site) {
+  const spider = await store.inspectSpider().catch(() => ({}));
+  const hardened = spider.kind === 'android-hardened' || spider.kind === 'android-dex';
+  return json(res, 501, {
+    error: `该源需要 ${site.runtime} 运行时（${hardened ? 'Android 加固包' : 'jar spider'}）`,
+    code: 'SPIDER_RUNTIME_MISSING',
+    site: publicSite(site),
+    spider: { kind: spider.kind, verdict: spider.verdict, guardBytes: spider.guardBytes },
+    fix: hardened
+      ? {
+          why: '加固包的 classes.dex 只是壳，真实字节码在 assets/*.guard 里，由 ARM 的 .so 解密后交给 ART；JVM / Node 都拿不到',
+          how: [
+            '1) 预检宿主能否跑 Android 容器：sudo bash sidecar/android/preflight.sh',
+            '2) x86_64 宿主先注册 ARM 转译：docker run --privileged --rm tonistiigi/binfmt --install arm64',
+            '3) 起容器：docker compose -f sidecar/android/docker-compose.redroid.yml up -d',
+            '4) 装 Host APK 并启动侧车，然后设 SPIDER_ANDROID_URL=http://<设备IP>:8899',
+            '（有闲置安卓手机/TV 盒子时优先用真机，成功率远高于 redroid）',
+          ],
+        }
+      : {
+          why: '这是标准 JVM jar，需要 JVM 侧车加载',
+          how: ['node scripts/jvm-sidecar.mjs', '设置 SPIDER_JVM_URL=http://127.0.0.1:8899'],
+        },
+  });
 }
 
 async function handleApi(req, res, url) {
@@ -261,16 +293,7 @@ async function handleApi(req, res, url) {
   if (p === '/api/home' || p === '/api/category') {
     const key = q.get('site');
     const site = await findSite(key);
-    if (!site.supported) {
-      const spider = await store.inspectSpider();
-      return json(res, 501, {
-        error: `该源需要 ${site.runtime} 运行时`,
-        code: 'SPIDER_RUNTIME_MISSING',
-        site: publicSite(site),
-        spider: { kind: spider.kind, verdict: spider.verdict },
-        hint: '设置 SPIDER_BRIDGE_URL 指向自建 spider 侧车即可启用',
-      });
-    }
+    if (!site.supported) return runtimeMissing(res, site);
     const r = await adapterFor(site, ctx).category({ tid: q.get('tid') || '', pg: Number(q.get('pg') || 1) });
     return json(res, 200, { site: publicSite(site), ...r });
   }
@@ -279,14 +302,7 @@ async function handleApi(req, res, url) {
     const site = await findSite(q.get('site'));
     const id = q.get('id');
     if (!id) return json(res, 400, { error: '缺少 id' });
-    if (!site.supported) {
-      const spider = await store.inspectSpider();
-      return json(res, 501, {
-        error: `该源需要 ${site.runtime} 运行时`,
-        code: 'SPIDER_RUNTIME_MISSING',
-        spider: { kind: spider.kind, verdict: spider.verdict },
-      });
-    }
+    if (!site.supported) return runtimeMissing(res, site);
     try {
       const r = await adapterFor(site, ctx).detail(id);
       return json(res, 200, { site: publicSite(site), ...r });
@@ -298,14 +314,7 @@ async function handleApi(req, res, url) {
   if (p === '/api/play') {
     const site = await findSite(q.get('site'));
     const id = q.get('id');
-    if (!site.supported) {
-      const spider = await store.inspectSpider();
-      return json(res, 501, {
-        error: `该源需要 ${site.runtime} 运行时`,
-        code: 'SPIDER_RUNTIME_MISSING',
-        spider: { kind: spider.kind, verdict: spider.verdict },
-      });
-    }
+    if (!site.supported) return runtimeMissing(res, site);
     try {
       const r = await adapterFor(site, ctx).play({ id, flag: q.get('flag') || '', ep: q.get('ep') || '0' });
       // 代理要带上取流所需的 Referer/UA，否则多数直播 CDN 直接 403
@@ -343,7 +352,8 @@ async function handleProxy(req, res, url) {
   }
 
   try {
-    const up = await fetch(origin, {
+    // fetchx：直连失败会回落 curl（curl 才读 HTTPS_PROXY），NAS 上很关键
+    const up = await fetchx(origin, {
       headers: {
         'User-Agent': ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
         Accept: '*/*',
@@ -351,6 +361,7 @@ async function handleProxy(req, res, url) {
         ...(range ? { Range: range } : {}),
       },
       redirect: 'follow',
+      timeout: 30000,
     });
 
     const ct = up.headers.get('content-type') || 'application/octet-stream';
@@ -404,10 +415,10 @@ async function handleProbe(req, res, url) {
   const target = url.searchParams.get('url');
   if (!target) return json(res, 400, { error: '缺少 url' });
   try {
-    const up = await fetch(target, {
+    const up = await fetchx(target, {
       headers: { 'User-Agent': 'Mozilla/5.0', Range: 'bytes=0-1' },
       redirect: 'follow',
-      signal: AbortSignal.timeout(12000),
+      timeout: 12000,
     });
     const ct = up.headers.get('content-type') || '';
     const finalUrl = up.url || target;

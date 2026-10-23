@@ -1,4 +1,5 @@
 // 统一 HTTP 客户端：UA 伪装、超时、重试、Referer、TVBox hosts 域名重写
+import { fetchx } from './curl.js';
 const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
@@ -61,15 +62,14 @@ export class HttpClient {
 
     let lastErr;
     for (let attempt = 0; attempt <= retry; attempt++) {
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), timeout);
       try {
-        const res = await fetch(target, { method, headers: h, body, signal: ac.signal, redirect });
+        // fetchx 内部：直连失败自动用 curl 重试（curl 读 HTTPS_PROXY）
+        const res = await fetchx(target, { method, headers: h, body, redirect, timeout });
         const buf = Buffer.from(await res.arrayBuffer());
         return {
           status: res.status,
           ok: res.ok,
-          headers: Object.fromEntries(res.headers.entries()),
+          headers: res.rawHeaders || {},
           buffer: buf,
           url: res.url || target,
         };
@@ -77,8 +77,6 @@ export class HttpClient {
         lastErr = e;
         if (attempt === retry) break;
         await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
-      } finally {
-        clearTimeout(timer);
       }
     }
     throw new Error(`${lastErr?.name === 'AbortError' ? '请求超时' : '请求失败'}: ${url}`);

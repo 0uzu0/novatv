@@ -1,14 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="novatv.host">
+<!-- AGP 8 起不允许在 manifest 里写 package，命名空间统一由 build.gradle 的 namespace 提供 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
   <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <!-- Android 14 起前台服务必须声明具体类型对应的权限 -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <!-- Android 13 起通知需要授权（拒绝也不影响服务运行，只是通知不显示） -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <!-- 保持 CPU 唤醒，避免长任务被 Doze 掐断 -->
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
 
   <application
       android:label="NovaTV Spider Host"
       android:usesCleartextTraffic="true"
       android:allowBackup="false">
+
+    <activity
+        android:name=".MainActivity"
+        android:exported="true"
+        android:label="NovaTV Spider Host">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
 
     <service
         android:name=".HostService"

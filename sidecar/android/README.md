@@ -1,106 +1,190 @@
-# Android 侧车：让「加固 spider jar」在服务端跑起来
+# Android 侧车：让「加固 spider」在网页端也能播
 
-## 为什么必须用 Android
+## 为什么非要 Android
 
-饭太硬这类配置的 `spider` 是 Android 加固产物，本仓库实测其结构：
+实测两份真实配置的 spider 包，结构完全同源：
 
-| 文件 | 大小 | 说明 |
+| 配置 | classes.dex | 加密字节码 | 解密库 |
+|---|---|---|---|
+| `饭太硬.cc/tv` | 36,972 B | `assets/ftyshinidie.guard` 1,329,913 B | `ftyguard_v7/v8.so` |
+| `wangerxiao.json` | 61,500 B | `assets/wexshinidie.guard` 888,742 B | `wexguard_v7/v8.so` |
+
+dex 只有几十 KB（一个加载壳），真实业务代码全在 guard 里，运行时由 **arm 的 .so** 解密后交给 ART。
+JVM 跑不了 dex、Node/QuickJS 更跑不了，dex2jar 出来是空壳。
+
+**结论**：这层逻辑只能跑在真正的 Android Runtime 里。
+
+## 但「网页端播放」照样成立
+
+关键是把两件事拆开：
+
+```
+浏览器（只负责解码播放 m3u8/mp4，不碰任何 spider）
+   │  /api/search /api/play /api/proxy
+   ▼
+NovaTV（NAS 上的容器）
+   │  POST /spider {site, method, params}      ← 就是普通 HTTP
+   ▼
+Host APK（手机 / TV 盒子 / redroid 里的 ART）
+   │  DexClassLoader → guard 解密 → 真实 spider
+   ▼
+返回 {"ok":true,"data":"{...json...}"}
+```
+
+浏览器永远拿不到也不需要字节码：它只收到标准化 JSON 和一个 `/api/proxy?url=...` 的播放地址。
+所以「加固源不能网页播」是个伪命题 —— 缺的不是播放能力，而是**一个把 spider 翻译成 HTTP 的执行体**。
+
+## 三种部署形态
+
+| 形态 | 适合 | 代价 |
 |---|---|---|
-| `classes.dex` | **36,972 B** | 只有一个壳/加载器，不含业务逻辑 |
-| `assets/ftyshinidie.guard` | **1,329,913 B** | 加密后的真实字节码 |
-| `assets/ftyguard_v7.so` | 81,520 B | armeabi-v7a 解密器 |
-| `assets/ftyguard_v8.so` | 102,440 B | arm64-v8a 解密器 |
+| **A. 旧手机（推荐）** | 家里有闲置 Android 7+ 手机/平板/TV 盒子 | 手机要常插电、关省电限制 |
+| **B. 真机 + adb** | 手机和 NAS 不同网段，或只想临时跑 | 必须连着电脑/NAS 的 adb |
+| **C. redroid 容器** | 不想用手机，NAS 是 ARM 或愿意折腾转译 | x86 NAS 上 arm .so 需要转译，成功率不稳 |
 
-dex 只有 37KB 而 guard 有 1.3MB —— 真实逻辑在运行时才由 native 层解密并交给 ART。
-**JVM（dex2jar）、Node、QuickJS 都拿不到字节码**，这不是"实现难度"问题，而是运行时缺失。
-所以只有一条路：让 jar 跑在真正的 Android Runtime 里，HTTP 暴露出来给主服务。
-
-## 整体结构
-
-```
-主服务 (node :8890)
-   │  POST /spider {site, method, params}
-   ▼
-adb forward tcp:8898 → 设备内 127.0.0.1:8899
-   │
-   ▼
-HostService.apk（本目录 host-apk）
-   │  DexClassLoader 加载 spider.jar（classes.dex）
-   │  com.github.catvod.spider.XxxGuard
-   ▼
-ART 执行 → guard .so 解密字节码 → 真正的 spider 逻辑
-```
-
-## 部署步骤（redroid 容器）
+### 形态 A：手机直连（不用电脑，推荐）
 
 ```bash
-# 1) 起 Android 容器（ARM 宿主机；x86 宿主见下方"ABI"章节）
+# 1) 手机装 APK（见 host-apk/README.md），打开 App，填个口令，点「启动侧车」
+#    屏幕会直接显示：SPIDER_ANDROID_URL=http://192.168.x.x:8899  SPIDER_TOKEN=xxx
+
+# 2) NAS 上改 .env
+SPIDER_ANDROID_URL=http://192.168.x.x:8899
+SPIDER_TOKEN=你刚才填的口令
+
+# 3) 重启容器
 docker compose up -d
-adb connect 127.0.0.1:5555
 
-# 2) 编 APK（需 Android SDK / gradle；见 host-apk/README.md）
-cd host-apk && ./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-
-# 3) 把 spider 包推进设备（路径必须是 app 的 external files）
-adb push ../spider.jar /sdcard/Android/data/novatv.host/files/spider.jar
-
-# 4) 起服务并做端口映射
-adb shell am start-foreground-service -n novatv.host/.HostService
-adb forward tcp:8898 tcp:8899
-curl http://127.0.0.1:8898/health     # {"ok":true,"android":"13","abi":"arm64-v8a"}
-
-# 5) 主服务接上侧车
-SPIDER_ANDROID_URL=http://127.0.0.1:8898 node server/index.js
+# 4) 自检（NAS 上执行）
+curl "http://192.168.x.x:8899/health?token=xxx"
 ```
 
-`/api/runtime` 里 `android-spider` 变为 `available: true`，46 个 `csp_*` 源自动可搜可播。
+之后打开网页搜索即可。**首次搜索时手机端会自动下载 spider 包**（约 1 MB，按配置里的 MD5 校验），
+不需要 adb push、不需要手动准备 jar。
 
-## ABI 与 native 库（最容易踩的坑）
-
-1. `ft yguard_v7/v8.so` 是 **arm** 库。x86 宿主机上的 redroid 默认没有 arm 转译，
-   会 `dlopen` 失败。三条路：
-   - 换 ARM 机器（Apple Silicon、ARM 云服务器）—— 最简单
-   - 用带 arm 转译的镜像（libndk / libhoudini），成功率看镜像
-   - **直接写真机 / 云手机**（电视盒子、旧手机都行），生产环境最稳
-2. jar 里的 `.so` 不会被 `DexClassLoader` 自动解压。guard 通常 `System.loadLibrary("ftyguard")`，
-   只会去 APK 的 `nativeLibraryDir` 找。所以打包前把 so 塞进 jniLibs：
+### 形态 B：真机 + adb
 
 ```bash
-unzip -o spider.jar 'assets/*.so' -d /tmp/so
-mkdir -p host-apk/app/src/main/jniLibs/arm64-v8a host-apk/app/src/main/jniLibs/armeabi-v7a
-cp /tmp/so/assets/ftyguard_v8.so host-apk/app/src/main/jniLibs/arm64-v8a/libftyguard_v8.so
-cp /tmp/so/assets/ftyguard_v7.so host-apk/app/src/main/jniLibs/armeabi-v7a/libftyguard_v7.so
-# 再 assembleDebug
-```
-
-## 真机替代方案（更省事）
-
-```bash
-adb devices
 adb install -r app-debug.apk
-adb push spider.jar /sdcard/Android/data/novatv.host/files/spider.jar
-adb shell am start-foreground-service -n novatv.host/.HostService
+adb shell am start-foreground-service -n novatv.host/.HostService \
+    --es token 你的口令 --ez lan false
+adb forward tcp:8898 tcp:8899
+# NAS 上（容器里要用 host.docker.internal 或 --network host）
+SPIDER_ANDROID_URL=http://127.0.0.1:8898
+```
+
+### 形态 C：redroid 容器
+
+**先跑预检，别跳过**——这一步决定后面所有事情是否有意义：
+
+```bash
+sudo bash sidecar/android/preflight.sh
+```
+
+它会检查 binder 内核驱动、ashmem/memfd、KVM、binfmt、Docker 特权，并直接给结论。
+
+预检通过后：
+
+```bash
+# 宿主机准备（每次重启都要做，建议写进开机脚本）
+modprobe binder_linux devices="binder,hwbinder,vndbinder"
+mkdir -p /dev/binderfs && mount -t binder binder /dev/binderfs
+
+# x86_64 宿主额外一步：注册 ARM 转译（只需一次）
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+
+# 起容器
+docker compose -f sidecar/android/docker-compose.redroid.yml up -d
+
+# 装 APK（见下面的"构建 APK"）
+adb connect <NAS_IP>:5555
+adb install -r novatv-host.apk
+adb shell am start-foreground-service -n novatv.host/.HostService --es token xxx --ez lan true
 adb forward tcp:8898 tcp:8899
 ```
 
-老款 Android 7+ 手机即可，成本比云机低，稳定性比转译容器高。
+关于 x86_64 宿主，必须把预期说清楚：
 
-## 协议（与 JVM 侧车完全一致）
+| 宿主架构 | 能否原生跑 | 实际表现 |
+|---|---|---|
+| ARM64 | ✅ 同架构 | 正常，一次 spider 调用 0.3~1.5 s |
+| x86_64 | ⚠️ 靠 QEMU 转译 | ART 冷启动 5~15 分钟，单次调用数十秒，内存翻倍 |
 
+原因很硬：加固包里的 `ftyguard_v7.so` / `ftyguard_v8.so` 只有 **ELF32 ARM / ELF64 AArch64**，
+没有 x86 版本（`node scripts/extract-spider-libs.mjs` 会读 ELF header 打印出来）。
+x86 宿主只能让容器以 arm64 运行，逐条翻译 ARM 指令。
+
+> 加固壳还可能校验 ABI、模拟器特征、签名。**redroid 的成功率天然低于真机**，
+> 遇到壳直接退出属于预期内，不是配置错了。
+
+### 构建 APK
+
+三条路，任选：
+
+```bash
+# A. GitHub Actions（推荐，不用装 Android SDK）
+#    手动触发 workflow「android-apk」，填 spider_url 即可；
+#    CI 会先抽 .so 再构建，产物在 Artifacts
+
+# B. 本地有 Android SDK + JDK 17
+node scripts/extract-spider-libs.mjs --config "http://www.饭太硬.cc/tv"
+cd sidecar/android/host-apk && gradle wrapper --gradle-version 8.9 && ./gradlew assembleDebug
+
+# C. Android Studio 打开 host-apk 目录，Build → Build APK(s)
 ```
-POST /spider
-{"site":{"key":"点我切源","api":"csp_DouDouGuard","ext":"","spiderJar":"/sdcard/..."},
- "method":"search","params":{"wd":"庆余年"}}
 
-→ {"ok":true,"data":"{\"list\":[{\"vod_id\":\"...\",\"vod_name\":\"...\"}]}"}
+## 协议（与 JVM 侧车一致，主服务不区分）
+
+```http
+GET /health[?token=]
+→ {"ok":true,"service":"novatv-android-sidecar","android":"13","abi":"arm64-v8a",
+   "jar":"/data/.../spider.jar","jarExists":true,"loaded":["csp_XxxGuard#..."],"tokenRequired":true}
+
+POST /load   {"url":"http://.../spider.jpg","md5":"c3bb107b..."}
+→ {"ok":true,"jar":"/data/.../spider.jar","bytes":959300,"md5":"c3bb107b..."}
+
+POST /spider {"site":{"key":"...","api":"csp_WexDoubanGuard","ext":"",
+                      "spiderUrl":"http://.../spider.jpg","spiderMd5":"..."},
+              "method":"search","params":{"wd":"庆余年"}}
+→ {"ok":true,"data":"{\"list\":[{\"vod_id\":\"...\",\"vod_name\":\"...\"}]}","tookMs":812}
 ```
 
-主服务的 `server/adapters/spider.js` 自动归一化，两边侧车可互换。
+`spiderUrl` / `spiderMd5` 由主服务自动从配置的 `spider` 字段里解析后带上（`server/adapters/spider.js`），
+所以手机端不需要知道配置长什么样。
+
+## 最容易踩的四个坑
+
+1. **.so 不会被自动解压**
+   `DexClassLoader` 只加载 dex；加固壳在运行时用 `System.loadLibrary("ftyguard_v8")` 找
+   `libftyguard_v8.so`，搜索路径是 APK 的 `lib/<abi>/`，**不是** jar 里的 `assets/`。
+   所以打包前必须把 `.so` 抽出来放进 jniLibs —— 用脚本做，别手抄：
+
+   ```bash
+   node scripts/extract-spider-libs.mjs --config "http://www.饭太硬.cc/tv"
+   # ✓ assets/ftyguard_v7.so → armeabi-v7a/libftyguard_v7.so
+   # ✓ assets/ftyguard_v8.so → arm64-v8a/libftyguard_v8.so
+   ```
+
+   脚本读 ELF header 的 `e_machine` 判 ABI（文件名里的 v7/v8 是厂商自定义后缀，不可靠），
+   并会拒绝把包内不存在的 ABI 写进 jniLibs。换配置换包时重跑一次即可。
+
+   另外 `targetSdk` 必须是 **23**：加固壳有时用 `System.load(绝对路径)` 加载，
+   而 Android 7(API 24) 起 linker namespace 会拒绝从 app 可写目录 dlopen，
+   只有 `targetSdk <= 23` 才走宽松策略。这一条改错，前面全白做。
+
+2. **x86 上没有 arm 转译** → `dlopen` 失败。换 ARM 机器/真机，或给 redroid 打 libndk 补丁。
+
+3. **Android 8+ 前台服务 5 秒内必须挂通知**，否则被系统杀。`HostService` 已经处理。
+
+4. **省电限制**：手机厂商的省电策略会在息屏后杀掉后台。需要在系统设置里给 App 加白名单，
+   并保持充电。这是形态 A 唯一的稳定性风险。
 
 ## 已知限制
 
-- 加固包混淆很强，部分 spider 会校验签名/包名/模拟器，容器里可能直接退出；
-  真机成功率明显高于 redroid。失败会在 `/api/play` 里带 `errorClass` 与设备日志。
-- 每个请求都要跨 adb/网络一次，延迟比进程内 JS 运行时高一个量级，建议加缓存。
-- 侧车是"高权限执行别人代码"的地方，务必只监听 127.0.0.1 并做进程隔离。
+- 加固包混淆很强，部分 spider 会校验签名/包名/模拟器，容器里可能直接退出；**真机成功率明显高于 redroid**。
+- 每个请求要跨一次网络，延迟比进程内 JS 运行时高一个量级（0.3~3 s），建议在网页端加结果缓存。
+- 侧车是「高权限执行别人代码」的地方：**必须设 token**，手机只在内网暴露，不要把 8899 映射到公网。
+- APK 工程在本机**未实际编译**（环境无 Android SDK/Gradle），首次构建由
+  `.github/workflows/android.yml` 完成。若 CI 报错，多半是 AGP(`8.5.2`) 与 Gradle(`8.9`) 版本不匹配。
+- 本文档里的 `preflight.sh`、`extract-spider-libs.mjs` 已在本机实测通过；
+  redroid 容器本身依赖宿主内核 binder，**未在真实 NAS 上验证过**，所以才有预检脚本。

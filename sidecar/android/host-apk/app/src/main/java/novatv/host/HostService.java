@@ -1,8 +1,12 @@
 package novatv.host;
 
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
 
@@ -11,19 +15,25 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.reflect.Method;
+import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URL;
+import java.net.URLDecoder;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -32,27 +42,42 @@ import dalvik.system.DexClassLoader;
 /**
  * NovaTV Android 侧车
  *
- * 唯一职责：在真 Android（ART）里加载固化 spider jar（csp_*Guard），
+ * 唯一职责：在真 Android（ART）里加载加固 spider jar（csp_*Guard），
  * 用与 JVM 侧车一致的 HTTP 协议对外提供 home/category/detail/search/play。
  *
- * 端口：设备内 127.0.0.1:8899，宿主机用 adb forward tcp:8898 tcp:8899 映射。
+ * 为什么要它：加固包的 classes.dex 只是壳，真实字节码在 assets/*.guard 里，
+ * 运行时由 arm 的 .so 解密后交给 ART。JVM / Node / QuickJS 都拿不到字节码。
  *
- * 关键点：
- *   - 必须用 DexClassLoader（jar 里是 classes.dex，不是 class）
- *   - parent 传本 APK 的 ClassLoader，让 jar 能链接到 com.github.catvod.crawler.Spider
- *   - 加固包的 native 库已在 jar 的 assets/ 里，DexClassLoader 不会自动解压 .so，
- *     所以首次加载前要把 assets/ftyguard_v*.so 解到 app 的 lib 目录（见 prepareNative）
+ * 两种接法（协议完全一样，主服务不区分）：
+ *   1. 局域网：本服务监听 0.0.0.0:8899，NAS 上设 SPIDER_ANDROID_URL=http://<手机IP>:8899
+ *   2. adb：  adb forward tcp:8898 tcp:8899，NAS 上设 http://127.0.0.1:8898
+ *
+ * 启动：
+ *   adb shell am start-foreground-service -n novatv.host/.HostService \
+ *       --es token 你的口令 --ez lan true
+ *
+ * 接口：
+ *   GET  /health[?token=]              → 设备/ABI/jar 状态
+ *   POST /load   {url, md5}            → 下载并校验 spider 包（免 adb push）
+ *   POST /spider {site, method, params}→ 调 spider
  */
 public class HostService extends Service {
   private static final String TAG = "NovaTVHost";
-  private static final int PORT = 8899;
-  private static final String PKG = "novatv.host";
+  private static final int NOTIFY_ID = 1001;
+  private static final String CHANNEL = "novatv-host";
 
   private ServerSocket server;
   private final ExecutorService pool = Executors.newFixedThreadPool(4);
-  private final Map<String, Object> spiders = new HashMap<>();
-  private final Map<String, DexClassLoader> loaders = new HashMap<>();
-  private final List<String> logs = new ArrayList<>();
+  // 4 个线程并发进来，必须用并发容器
+  private final Map<String, Object> spiders = new ConcurrentHashMap<String, Object>();
+  private final Map<String, DexClassLoader> loaders = new ConcurrentHashMap<String, DexClassLoader>();
+  private final Map<String, Long> loadAttempts = new ConcurrentHashMap<String, Long>();
+  private final List<String> logs = Collections.synchronizedList(new ArrayList<String>());
+
+  private String bindHost = "127.0.0.1";
+  private int port = 8899;
+  private String token = "";
+  private String jarPath = "";
 
   @Override
   public IBinder onBind(Intent intent) {
@@ -60,12 +85,64 @@ public class HostService extends Service {
   }
 
   @Override
+  public void onCreate() {
+    super.onCreate();
+    jarPath = defaultJar();
+  }
+
+  @Override
   public int onStartCommand(Intent intent, int flags, int startId) {
+    if (intent != null) {
+      // 手机直连场景必须 lan=true，否则只监听回环、NAS 连不上
+      if (intent.getBooleanExtra("lan", false)) bindHost = "0.0.0.0";
+      String h = intent.getStringExtra("host");
+      if (h != null && h.length() > 0) bindHost = h;
+      port = intent.getIntExtra("port", 8899);
+      String t = intent.getStringExtra("token");
+      if (t != null) token = t;
+    }
+    startForegroundCompat();
     if (server == null) {
       new Thread(this::serve, "novatv-host-accept").start();
     }
-    log("host service started");
+    log("host service started " + bindHost + ":" + port);
     return START_STICKY;
+  }
+
+  @Override
+  public void onDestroy() {
+    try {
+      if (server != null) server.close();
+    } catch (Exception ignored) {
+    }
+    server = null;
+    super.onDestroy();
+  }
+
+  /** Android 8+ 前台服务必须在 5 秒内挂通知，否则直接被系统杀掉 */
+  private void startForegroundCompat() {
+    try {
+      Notification n;
+      if (Build.VERSION.SDK_INT >= 26) {
+        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        NotificationChannel ch = new NotificationChannel(CHANNEL, "NovaTV Spider 侧车", NotificationManager.IMPORTANCE_LOW);
+        nm.createNotificationChannel(ch);
+        n = new Notification.Builder(this, CHANNEL)
+            .setContentTitle("NovaTV Spider 侧车运行中")
+            .setContentText("监听 " + bindHost + ":" + port)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .build();
+      } else {
+        n = new Notification.Builder(this)
+            .setContentTitle("NovaTV Spider 侧车运行中")
+            .setContentText("监听 " + bindHost + ":" + port)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .build();
+      }
+      startForeground(NOTIFY_ID, n);
+    } catch (Throwable e) {
+      log("startForeground 失败: " + e);
+    }
   }
 
   private void log(String s) {
@@ -76,8 +153,8 @@ public class HostService extends Service {
 
   private void serve() {
     try {
-      server = new ServerSocket(PORT, 16, InetAddress.getByName("127.0.0.1"));
-      log("listening 127.0.0.1:" + PORT);
+      server = new ServerSocket(port, 16, InetAddress.getByName(bindHost));
+      log("listening " + bindHost + ":" + port);
       while (!server.isClosed()) {
         Socket s = server.accept();
         pool.submit(() -> handle(s));
@@ -88,30 +165,41 @@ public class HostService extends Service {
   }
 
   private void handle(Socket socket) {
-    try (Socket s = socket) {
-      InputStream in = s.getInputStream();
+    try {
+      InputStream in = socket.getInputStream();
+      // 逐字节读到 \r\n\r\n，比状态机稳妥
       ByteArrayOutputStream head = new ByteArrayOutputStream();
-      int b, state = 0;
-      while ((b = in.read()) >= 0) {
-        head.write(b);
-        if (b == '\n' && (state == 1 || state == 3)) {
-          if (state == 3) break;
-          state++;
-        } else if (b == '\r') {
-          state++;
-        } else {
-          state = 0;
-        }
+      int a = -1, b = -1, c = -1, d;
+      while ((d = in.read()) >= 0) {
+        head.write(d);
+        if (a == '\r' && b == '\n' && c == '\r' && d == '\n') break;
+        a = b;
+        b = c;
+        c = d;
       }
-      String headText = head.toString("UTF-8");
-      String[] lines = headText.split("\r?\n");
-      String[] first = lines[0].split(" ");
-      String path = first.length > 1 ? first[1] : "/";
+      String[] lines = head.toString("UTF-8").split("\r?\n");
+      String requestLine = lines.length > 0 ? lines[0] : "";
+      String[] first = requestLine.split(" ");
+      String target = first.length > 1 ? first[1] : "/";
+      String path = target;
+      String query = "";
+      int qi = target.indexOf('?');
+      if (qi >= 0) {
+        path = target.substring(0, qi);
+        query = target.length() > qi + 1 ? target.substring(qi + 1) : "";
+      }
       int len = 0;
-      for (String line : lines) {
-        if (line.toLowerCase().startsWith("content-length:")) {
-          len = Integer.parseInt(line.substring(15).trim());
+      String headerToken = "";
+      for (int i = 1; i < lines.length; i++) {
+        String line = lines[i];
+        String lower = line.toLowerCase();
+        if (lower.startsWith("content-length:")) {
+          try {
+            len = Integer.parseInt(line.substring(15).trim());
+          } catch (Exception ignored) {
+          }
         }
+        if (lower.startsWith("x-nova-token:")) headerToken = line.substring(13).trim();
       }
       byte[] body = new byte[len];
       int read = 0;
@@ -121,29 +209,170 @@ public class HostService extends Service {
         read += n;
       }
 
+      String givenToken = headerToken.length() > 0 ? headerToken : queryParam(query, "token");
+      if (token.length() > 0 && !token.equals(givenToken)) {
+        reply(socket, 401, err("unauthorized", "token 不正确"));
+        return;
+      }
+
       String resp;
       if (path.startsWith("/health")) {
         JSONObject o = new JSONObject();
         o.put("ok", true);
         o.put("service", "novatv-android-sidecar");
-        o.put("android", android.os.Build.VERSION.RELEASE);
-        o.put("abi", android.os.Build.SUPPORTED_ABIS[0]);
+        o.put("android", Build.VERSION.RELEASE);
+        o.put("sdk", Build.VERSION.SDK_INT);
+        o.put("abi", Build.SUPPORTED_ABIS.length > 0 ? Build.SUPPORTED_ABIS[0] : "?");
+        o.put("model", Build.MANUFACTURER + " " + Build.MODEL);
+        o.put("host", bindHost);
+        o.put("port", port);
+        o.put("tokenRequired", token.length() > 0);
+        o.put("jar", jarPath);
+        o.put("jarExists", new File(jarPath).exists());
+        o.put("jarBytes", new File(jarPath).exists() ? new File(jarPath).length() : 0);
         o.put("loaded", new JSONArray(spiders.keySet()));
+        o.put("logs", new JSONArray(logs));
         resp = o.toString();
+      } else if (path.startsWith("/load")) {
+        resp = load(new JSONObject(new String(body, "UTF-8"))).toString();
       } else if (path.startsWith("/spider")) {
         resp = spider(new JSONObject(new String(body, "UTF-8"))).toString();
       } else {
-        resp = "{\"ok\":false,\"error\":\"not found\"}";
+        resp = err("not_found", "只支持 /health /load /spider");
+        reply(socket, 404, resp);
+        return;
       }
-      byte[] out = resp.getBytes("UTF-8");
-      OutputStream os = s.getOutputStream();
-      os.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: "
-          + out.length + "\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
-      os.write(out);
-      os.flush();
-    } catch (Exception e) {
+      reply(socket, 200, resp);
+    } catch (Throwable e) {
       log("handle error " + e);
+      try {
+        reply(socket, 500, err("internal", String.valueOf(e)));
+      } catch (Exception ignored) {
+      }
+    } finally {
+      try {
+        socket.close();
+      } catch (Exception ignored) {
+      }
     }
+  }
+
+  private static String err(String code, String msg) {
+    try {
+      JSONObject o = new JSONObject();
+      o.put("ok", false);
+      o.put("error", msg);
+      o.put("errorClass", code);
+      return o.toString();
+    } catch (Exception e) {
+      return "{\"ok\":false}";
+    }
+  }
+
+  private static String queryParam(String query, String key) {
+    if (query == null || query.length() == 0) return "";
+    for (String kv : query.split("&")) {
+      int i = kv.indexOf('=');
+      if (i <= 0) continue;
+      if (!key.equals(kv.substring(0, i))) continue;
+      try {
+        return URLDecoder.decode(kv.substring(i + 1), "UTF-8");
+      } catch (Exception e) {
+        return "";
+      }
+    }
+    return "";
+  }
+
+  private static void reply(Socket socket, int code, String body) throws Exception {
+    byte[] out = body.getBytes("UTF-8");
+    OutputStream os = socket.getOutputStream();
+    os.write(("HTTP/1.1 " + code + " OK\r\n"
+        + "Content-Type: application/json; charset=utf-8\r\n"
+        + "Access-Control-Allow-Origin: *\r\n"
+        + "Content-Length: " + out.length + "\r\n"
+        + "Connection: close\r\n\r\n").getBytes("UTF-8"));
+    os.write(out);
+    os.flush();
+  }
+
+  /**
+   * 下载 spider 包并校验 MD5。
+   * 手机上没有主服务的文件系统，配置里的 spider 地址才是唯一真相，
+   * 所以让侧车自己拉：一次加载，之后走本地缓存。
+   */
+  private JSONObject load(JSONObject req) {
+    JSONObject out = new JSONObject();
+    try {
+      String url = req.optString("url");
+      String md5 = req.optString("md5");
+      if (url.length() == 0) throw new IllegalArgumentException("缺少 url");
+
+      File dir = new File(getFilesDir(), "spider");
+      if (!dir.exists()) dir.mkdirs();
+      File tmp = new File(dir, "download.tmp");
+      File dst = new File(dir, "spider.jar");
+
+      HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+      conn.setInstanceFollowRedirects(true);
+      conn.setConnectTimeout(15000);
+      conn.setReadTimeout(60000);
+      conn.setRequestProperty("User-Agent", "okhttp/3.15");
+      conn.setRequestProperty("Accept", "*/*");
+      int code = conn.getResponseCode();
+      if (code < 200 || code >= 300) throw new IllegalStateException("下载失败 HTTP " + code);
+
+      MessageDigest md = MessageDigest.getInstance("MD5");
+      InputStream is = conn.getInputStream();
+      FileOutputStream fos = new FileOutputStream(tmp);
+      byte[] buf = new byte[16384];
+      int n;
+      long total = 0;
+      while ((n = is.read(buf)) > 0) {
+        fos.write(buf, 0, n);
+        md.update(buf, 0, n);
+        total += n;
+      }
+      fos.close();
+      is.close();
+      conn.disconnect();
+
+      StringBuilder sb = new StringBuilder();
+      for (byte x : md.digest()) sb.append(String.format("%02x", x));
+      String actual = sb.toString();
+      boolean md5Ok = md5.length() == 0 || md5.equalsIgnoreCase(actual);
+
+      if (!md5Ok) {
+        tmp.delete();
+        out.put("ok", false);
+        out.put("error", "MD5 不匹配");
+        out.put("expected", md5);
+        out.put("actual", actual);
+        return out;
+      }
+      if (dst.exists()) dst.delete();
+      if (!tmp.renameTo(dst)) throw new IllegalStateException("落盘失败 " + dst);
+
+      // 换包后旧实例必须全部作废，否则还指着老 dex
+      spiders.clear();
+      loaders.clear();
+      jarPath = dst.getAbsolutePath();
+
+      out.put("ok", true);
+      out.put("jar", jarPath);
+      out.put("bytes", total);
+      out.put("md5", actual);
+      log("jar loaded " + total + "B md5=" + actual);
+    } catch (Throwable e) {
+      try {
+        out.put("ok", false);
+        out.put("error", String.valueOf(e.getMessage()));
+        out.put("errorClass", e.getClass().getName());
+      } catch (Exception ignored) {
+      }
+      log("load error " + e);
+    }
+    return out;
   }
 
   private JSONObject spider(JSONObject req) {
@@ -155,15 +384,35 @@ public class HostService extends Service {
       String api = site.optString("api");
       String ext = site.optString("ext");
       String key = site.optString("key");
-      String jar = site.optString("spiderJar");
-      if (jar.isEmpty()) jar = defaultJar();
+
+      // 主服务给的是它自己机器上的路径，手机上没意义，只认设备本地的包
+      String jar = new File(jarPath).exists() ? jarPath : "";
+      if (jar.length() == 0) {
+        // 设备上还没有包：用主服务随请求送来的配置地址自己拉，一次到位
+        String url = site.optString("spiderUrl");
+        String md5 = site.optString("spiderMd5");
+        if (url.length() == 0) {
+          throw new IllegalStateException("设备上没有 spider 包，且请求里没带 spiderUrl；先调 POST /load {url,md5}");
+        }
+        Long last = loadAttempts.get(url);
+        long now = System.currentTimeMillis();
+        if (last != null && now - last < 60000 && !new File(jarPath).exists()) {
+          throw new IllegalStateException("正在/刚刚拉取过 spider 包，稍后再试（60s 内不重复下载）");
+        }
+        loadAttempts.put(url, now);
+        JSONObject lr = load(packLoadReq(url, md5));
+        if (!lr.optBoolean("ok")) {
+          throw new IllegalStateException("自动拉取 spider 包失败: " + lr.optString("error"));
+        }
+        jar = jarPath;
+      }
 
       Object sp = instance(key, api, ext, jar);
       Object data = dispatch(sp, req.optString("method"), req.optJSONObject("params"));
       out.put("ok", true);
       out.put("data", data == null ? "" : String.valueOf(data));
       out.put("tookMs", System.currentTimeMillis() - t0);
-      out.put("engine", "android/" + android.os.Build.VERSION.RELEASE);
+      out.put("engine", "android/" + Build.VERSION.RELEASE + " " + Build.SUPPORTED_ABIS[0]);
     } catch (Throwable e) {
       StringWriter sw = new StringWriter();
       e.printStackTrace(new PrintWriter(sw));
@@ -171,7 +420,9 @@ public class HostService extends Service {
         out.put("ok", false);
         out.put("error", String.valueOf(e.getMessage()));
         out.put("errorClass", e.getClass().getName());
-        out.put("stack", sw.toString().substring(0, Math.min(1200, sw.toString().length())));
+        String st = sw.toString();
+        out.put("stack", st.substring(0, Math.min(1200, st.length())));
+        out.put("hint", hintFor(e));
         out.put("logs", new JSONArray(logs));
       } catch (Exception ignored) {
       }
@@ -180,10 +431,31 @@ public class HostService extends Service {
     return out;
   }
 
+  private static JSONObject packLoadReq(String url, String md5) {
+    try {
+      JSONObject o = new JSONObject();
+      o.put("url", url);
+      o.put("md5", md5);
+      return o;
+    } catch (Exception e) {
+      return new JSONObject();
+    }
+  }
+
+  private static String hintFor(Throwable e) {
+    String s = String.valueOf(e);
+    if (e instanceof UnsatisfiedLinkError || s.contains("dlopen")) {
+      return "native 库没加载：把 jar 里的 assets/wexguard_v8.so 放进 APK 的 jniLibs/arm64-v8a/libwexguard_v8.so 后重新打包；x86 模拟器缺 arm 转译";
+    }
+    if (e instanceof ClassNotFoundException) {
+      return "找不到 csp_ 类：spider 包与配置不匹配，或 /load 下的是错的包";
+    }
+    return "";
+  }
+
   private String defaultJar() {
-    File ext = getExternalFilesDir(null);
-    if (ext != null) return new File(ext, "spider.jar").getAbsolutePath();
-    return new File(getFilesDir(), "spider.jar").getAbsolutePath();
+    File f = new File(new File(getFilesDir(), "spider"), "spider.jar");
+    return f.getAbsolutePath();
   }
 
   private Object instance(String key, String api, String ext, String jarPath) throws Exception {
@@ -233,30 +505,29 @@ public class HostService extends Service {
   private Object dispatch(Object sp, String method, JSONObject p) throws Exception {
     if (p == null) p = new JSONObject();
     Class<?> c = sp.getClass();
-    switch (method) {
-      case "home":
-        return c.getMethod("homeContent", boolean.class).invoke(sp, true);
-      case "category": {
-        HashMap<String, String> f = new HashMap<>();
-        return c.getMethod("categoryContent", String.class, boolean.class, HashMap.class)
-            .invoke(sp, p.optString("tid"), false, f);
-      }
-      case "detail": {
-        List<String> ids = new ArrayList<>();
-        ids.add(p.optString("id"));
-        return c.getMethod("detailContent", List.class).invoke(sp, ids);
-      }
-      case "search":
-        return c.getMethod("searchContent", String.class, boolean.class)
-            .invoke(sp, p.optString("wd"), false);
-      case "play": {
-        List<String> ids = new ArrayList<>();
-        ids.add(p.optString("ep"));
-        return c.getMethod("playerContent", String.class, List.class, HashMap.class)
-            .invoke(sp, p.optString("flag"), ids, new HashMap<String, String>());
-      }
-      default:
-        throw new IllegalArgumentException("不支持的方法 " + method);
+    if ("home".equals(method)) {
+      return c.getMethod("homeContent", boolean.class).invoke(sp, true);
     }
+    if ("category".equals(method)) {
+      HashMap<String, String> f = new HashMap<String, String>();
+      return c.getMethod("categoryContent", String.class, boolean.class, HashMap.class)
+          .invoke(sp, p.optString("tid"), false, f);
+    }
+    if ("detail".equals(method)) {
+      List<String> ids = new ArrayList<String>();
+      ids.add(p.optString("id"));
+      return c.getMethod("detailContent", List.class).invoke(sp, ids);
+    }
+    if ("search".equals(method)) {
+      return c.getMethod("searchContent", String.class, boolean.class)
+          .invoke(sp, p.optString("wd"), false);
+    }
+    if ("play".equals(method)) {
+      List<String> ids = new ArrayList<String>();
+      ids.add(p.optString("ep"));
+      return c.getMethod("playerContent", String.class, List.class, HashMap.class)
+          .invoke(sp, p.optString("flag"), ids, new HashMap<String, String>());
+    }
+    throw new IllegalArgumentException("不支持的方法 " + method);
   }
 }

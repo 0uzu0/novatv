@@ -12,3 +12,12 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# 加固包的 native 库由 scripts/extract-spider-libs.mjs 现场生成（第三方壳二进制，不入库）
+# 需要预置时：node scripts/extract-spider-libs.mjs --config "http://www.饭太硬.cc/tv"
+sidecar/android/host-apk/app/src/main/jniLibs/*/
+# APK 构建产物
+sidecar/android/host-apk/app/build/
+sidecar/android/host-apk/.gradle/
+sidecar/android/host-apk/build/
+sidecar/android/host-apk/local.properties

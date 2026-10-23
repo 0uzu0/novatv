@@ -119,17 +119,24 @@ node scripts/jvm-sidecar.mjs        # javac 编译 + 打 demo jar + 起 8899
 
 已备好：
 
-- `sidecar/android/docker-compose.yml`：redroid arm64 容器
-- `sidecar/android/host-apk/`：`HostService.java`（手写 HTTP + DexClassLoader + 反射调用）、Manifest、gradle 说明
-- `sidecar/android/README.md`：完整 runbook（含 `adb push` 路径、`adb forward`、健康检查）
+- `sidecar/android/preflight.sh`：宿主可行性预检（binder/ashmem/KVM/binfmt/privileged），10 秒给结论
+- `sidecar/android/docker-compose.redroid.yml`：redroid 容器（含 `platform: linux/arm64` 与 binderfs 挂载）
+- `sidecar/android/host-apk/`：`HostService.java`（手写 HTTP + DexClassLoader + 反射调用）、Manifest、gradle 工程
+- `scripts/extract-spider-libs.mjs`：从加固包抽 `.so` → `jniLibs/<abi>/`（按 ELF header 判 ABI，不靠文件名）
+- `.github/workflows/android.yml`：CI 自动构建 APK（先抽 `.so` 再 `assembleDebug`），产物走 Artifacts
+- `sidecar/android/README.md`：完整 runbook（三种部署形态 + 排障表）
 
-三个必须知道的坑：
+四个必须知道的坑：
 
-1. **ABI**：`ftyguard_v7/v8.so` 是 arm 库。x86 宿主上的 redroid 默认没有 arm 转译 → `dlopen` 失败。
-   ARM 机器 / 真机 / 云手机才是稳的。
+1. **ABI**：`ftyguard_v7/v8.so` 实测是 `ELF32 ARM` / `ELF64 AArch64`，**包里没有 x86 版本**。
+   x86_64 宿主只能让容器以 arm64 运行（`platform: linux/arm64` + `binfmt`）+ QEMU 逐条翻译：
+   ART 冷启动 5~15 分钟，单次调用数十秒。ARM 机器 / 真机 / 云手机才是稳的。
 2. **`.so` 不会被自动解压**：`DexClassLoader` 不处理 jar 里的 `assets/*.so`，而 guard 走的是
-   `System.loadLibrary`（只认 APK 的 `nativeLibraryDir`）。打包前把 so 塞进 `jniLibs/`。
-3. **反调试/反模拟器**：加固包普遍校验包名、签名、模拟器特征。容器成功率明显低于真机；
+   `System.loadLibrary("ftyguard_v8")`（只认 APK 的 `lib/<abi>/`）。打包前必须用
+   `scripts/extract-spider-libs.mjs` 抽出来放进 `jniLibs/`。
+3. **`targetSdk` 必须是 23**：壳有时用 `System.load(绝对路径)`，Android 7(API 24) 起 linker namespace
+   会拒绝从 app 可写目录 dlopen，只有 `targetSdk <= 23` 走宽松策略。写错这一步，前面全白做。
+4. **反调试/反模拟器**：加固包普遍校验包名、签名、模拟器特征。容器成功率明显低于真机；
    失败时 `/api/play` 会带 `errorClass` 与设备日志，不吞错。
 
 成本估算：一台 Android 7+ 旧手机即可，比云机便宜且更稳；一个侧车可服务整份配置的 46 个源。

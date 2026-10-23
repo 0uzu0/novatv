@@ -1,0 +1,118 @@
+name: android-apk
+
+# 构建 NovaTV Android 侧车 APK（Host APK）
+#
+# 为什么需要 CI 构建：
+#   Host APK 依赖 Android SDK，本地装一遍要几个 G。CI 上跑完直接产 artifact，
+#   下载装到手机 / adb install 到 redroid 都行。
+#
+# 关键一步是从加固包里抽 native 库：
+#   加固壳运行时用 System.loadLibrary("ftyguard_v8") 找 libftyguard_v8.so，
+#   搜索路径是 APK 的 lib/<abi>/，不是 jar 里的 assets/。
+#   所以必须先把 .so 抽出来放进 jniLibs，否则 APK 装上也会 UnsatisfiedLinkError。
+#
+# 触发：
+#   - 手动（可传 spider 包地址）
+#   - 打 v* 标签时自动（用仓库里的 jniLibs，如果之前提交过）
+
+on:
+  workflow_dispatch:
+    inputs:
+      spider_url:
+        description: "spider 包直链（留空则用仓库内已有的 jniLibs）"
+        required: false
+        default: ""
+      spider_md5:
+        description: "spider 包 MD5（可留空跳过校验）"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      # 把加固包的 .so 抽到 jniLibs。没有 so 的 APK 装上也是废的，
+      # 所以这一步失败就应该让整个构建失败（除非明确不传 url）。
+      - name: Extract native libs from spider pack
+        if: ${{ inputs.spider_url != '' }}
+        run: |
+          node scripts/extract-spider-libs.mjs \
+            --url "${{ inputs.spider_url }}" \
+            --md5 "${{ inputs.spider_md5 }}"
+          echo "--- 抽取结果 ---"
+          find sidecar/android/host-apk/app/src/main/jniLibs -type f | sort
+
+      - name: Inspect jniLibs
+        run: |
+          DIR=sidecar/android/host-apk/app/src/main/jniLibs
+          if [ ! -d "$DIR" ] || [ -z "$(find "$DIR" -name '*.so' -print -quit)" ]; then
+            echo "::warning::jniLibs 里没有 .so。APK 能构建，但加载加固包时必然 UnsatisfiedLinkError。"
+            echo "::warning::请手动触发 workflow 并填 spider_url，或本地跑 scripts/extract-spider-libs.mjs 后提交 jniLibs。"
+          else
+            echo "找到 native 库："
+            find "$DIR" -name '*.so' -exec ls -l {} \;
+          fi
+
+      - name: Build debug APK
+        working-directory: sidecar/android/host-apk
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: novatv-host-apk
+          path: sidecar/android/host-apk/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload jniLibs manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: novatv-host-jnilibs-manifest
+          path: sidecar/android/host-apk/app/src/main/jniLibs/libs-manifest.json
+          if-no-files-found: ignore
+
+      - name: Summary
+        run: |
+          {
+            echo "### NovaTV Host APK"
+            echo ""
+            echo "产物见 Artifacts → \`novatv-host-apk\`"
+            echo ""
+            echo "安装到 redroid："
+            echo '```bash'
+            echo "adb connect <NAS_IP>:5555"
+            echo "adb install -r novatv-host.apk"
+            echo "adb shell am start-foreground-service -n novatv.host/.HostService --es token YOUR_TOKEN --ez lan true"
+            echo "adb forward tcp:8898 tcp:8899"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

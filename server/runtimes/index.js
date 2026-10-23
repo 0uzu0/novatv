@@ -41,7 +41,9 @@ export function sidecarUrls() {
 async function ping(base, timeout = 900) {
   if (!base) return { configured: false, up: false };
   try {
-    const res = await fetch(base.replace(/\/$/, '') + '/health', { signal: AbortSignal.timeout(timeout) });
+    // 侧车开了 token 时必须带，否则健康检查会误判为 down
+    const headers = process.env.SPIDER_TOKEN ? { 'X-Nova-Token': process.env.SPIDER_TOKEN } : {};
+    const res = await fetch(base.replace(/\/$/, '') + '/health', { headers, signal: AbortSignal.timeout(timeout) });
     const body = await res.json().catch(() => ({}));
     return { configured: true, up: res.ok, url: base, body };
   } catch (e) {
@@ -50,7 +52,13 @@ async function ping(base, timeout = 900) {
 }
 
 export function androidArtifacts() {
-  const files = ['android/docker-compose.yml', 'android/host-apk/README.md', 'android/host-apk/HostService.java'];
+  const files = [
+    'android/docker-compose.yml',
+    'android/README.md',
+    'android/host-apk/README.md',
+    'android/host-apk/app/src/main/java/novatv/host/HostService.java',
+    'android/host-apk/app/src/main/AndroidManifest.xml',
+  ];
   return files.map((f) => ({ file: f, present: fs.existsSync(path.join(SIDECAR_DIR, f)) }));
 }
 
@@ -84,12 +92,14 @@ export async function capabilityMatrix({ spider = null } = {}) {
         id: 'jar-spider',
         label: 'JVM spider jar（未加固）',
         engine: java ? `本地 JDK · ${java}` : 'JDK 缺失',
-        available: Boolean(jvm.up) || Boolean(java),
+        // 能不能跑取决于侧车是否在线；有 JDK 只是"起得来"
+        available: Boolean(jvm.up),
+        jdk: java || null,
         supportedTypes: ['type=3 + api=csp_*（未加固 jar）'],
         note: jvm.up
           ? '侧车在线，可直接调用'
           : java
-            ? '可本地起 sidecar/jvm 侧车（node scripts/start-jvm-sidecar.mjs）'
+            ? '本机有 JDK，起 sidecar/jvm 侧车（node scripts/jvm-sidecar.mjs）后即可用'
             : '需要先安装 JDK 21+ 或改用 Android 侧车',
         sidecar: jvm,
       },

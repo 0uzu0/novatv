@@ -12,17 +12,42 @@
  */
 import { buildRoutes, resolvePlayUrl } from './cms.js';
 
-function pickBridge(site) {
+/**
+ * 候选侧车列表（按优先级）。
+ *
+ * 判定依据有两个，缺一不可：
+ *   1. api 名以 Guard 结尾 —— 绝大多数加固包这么命名（csp_WexxxxGuard）
+ *   2. 配置里 spider 包的实测结构（kind=android-hardened）—— 兜住命名不规范的包
+ *
+ * 顺序很重要：加固包投给 JVM 必然失败，所以 Android 必须排前面。
+ * 但同时保留其余候选做兜底——单独一个 SPIDER_JVM_URL 默认值（127.0.0.1:8899）
+ * 会让"没起 JVM 侧车"看起来像"配置了 JVM"，不兜底就会一直打空端口。
+ */
+function pickBridges(site, hardenedPkg = false) {
   const env = process.env;
-  const isJvmJar = site?.spiderKind === 'jvm-jar' || /^csp_/i.test(String(site?.api || ''));
-  const candidates = [
-    env.SPIDER_JVM_URL,
-    env.SPIDER_BRIDGE_URL && !/android/i.test(env.SPIDER_BRIDGE_URL) ? env.SPIDER_BRIDGE_URL : '',
-    isJvmJar ? 'http://127.0.0.1:8899' : '',
-    env.SPIDER_ANDROID_URL,
-    env.SPIDER_BRIDGE_URL,
-  ].filter(Boolean);
-  return candidates[0] || '';
+  const api = String(site?.api || '');
+  const hardened = hardenedPkg || /Guard$/i.test(api);
+
+  const android =
+    env.SPIDER_ANDROID_URL || (/android/i.test(env.SPIDER_BRIDGE_URL || '') ? env.SPIDER_BRIDGE_URL : '');
+  const jvm =
+    env.SPIDER_JVM_URL ||
+    (env.SPIDER_BRIDGE_URL && !/android/i.test(env.SPIDER_BRIDGE_URL) ? env.SPIDER_BRIDGE_URL : '') ||
+    'http://127.0.0.1:8899';
+  const generic = env.SPIDER_BRIDGE_URL || '';
+
+  const order = hardened ? [android, jvm, generic] : [jvm, android, generic];
+  return [...new Set(order.filter(Boolean).map((u) => u.replace(/\/$/, '')))];
+}
+
+/** 只把"连不上"当成可回落的错误；业务错误必须原样抛出，否则会掩盖真实问题 */
+function isConnectFailure(e) {
+  const msg = String(e?.message || '');
+  const code = e?.cause?.code || e?.code || '';
+  return (
+    /fetch failed|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ETIMEDOUT|socket hang up|aborted/i.test(msg) ||
+    /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ETIMEDOUT|UND_ERR/i.test(code)
+  );
 }
 
 const asObj = (v) => {
@@ -59,15 +84,42 @@ export class SpiderBridgeAdapter {
   constructor(site, ctx) {
     this.site = site;
     this.ctx = ctx;
-    this.bridge = pickBridge(site);
   }
 
   get available() {
-    return Boolean(this.bridge);
+    return pickBridges(this.site).length > 0;
+  }
+
+  /**
+   * 配置里声明的 spider 包地址（形如 `http://x/y.jpg;md5;abc...`）
+   * Android 侧车在手机上，主服务的本地路径对它没意义；
+   * 带上 URL + MD5，手机端可以自己下载并按摘要校验，不用 adb push。
+   */
+  async #spiderSource() {
+    try {
+      const cfg = await this.ctx.store.get();
+      const raw = String(cfg?.spider || '').trim();
+      if (!raw) return {};
+      const [url, md5] = raw.split(';md5;');
+      return {
+        spiderUrl: /^https?:/i.test(url.trim()) ? url.trim() : '',
+        spiderMd5: (md5 || '').trim(),
+      };
+    } catch {
+      return {};
+    }
   }
 
   async #call(method, params = {}) {
-    if (!this.bridge) {
+    // api 名不带 Guard 时，用包的真实结构兜一层（有缓存，不会反复下载）
+    let hardenedPkg = false;
+    if (!/Guard$/i.test(String(this.site.api || ''))) {
+      const diag = await this.ctx.store.inspectSpider().catch(() => ({}));
+      hardenedPkg = diag.kind === 'android-hardened' || diag.kind === 'android-dex';
+    }
+    const bridges = pickBridges(this.site, hardenedPkg);
+
+    if (!bridges.length) {
       const diag = await this.ctx.store.inspectSpider().catch(() => ({}));
       const err = new Error(
         `源「${this.site.name}」依赖 ${this.site.api}（${this.site.runtimeReason}），当前没有可用的 spider 侧车`,
@@ -78,17 +130,65 @@ export class SpiderBridgeAdapter {
         api: this.site.api,
         spider: { kind: diag.kind, verdict: diag.verdict, guardBytes: diag.guardBytes },
         fix:
-          diag.kind === 'android-hardened'
-            ? '加固包只能用 Android 容器：sidecar/android/docker-compose.yml（redroid）或真机 + Host APK'
+          diag.kind === 'android-hardened' || diag.kind === 'android-dex'
+            ? '加固包必须跑在 Android 里：起 sidecar/android/docker-compose.redroid.yml，装 Host APK 后设置 SPIDER_ANDROID_URL'
             : '普通 jar 可起 JVM 侧车：node scripts/jvm-sidecar.mjs，并设置 SPIDER_JVM_URL',
       };
       throw err;
     }
-    const res = await fetch(this.bridge.replace(/\/$/, '') + '/spider', {
+
+    const src = await this.#spiderSource();
+    const tried = [];
+    for (const base of bridges) {
+      try {
+        const data = await this.#request(base, method, params, src);
+        this.engine = base;
+        return data;
+      } catch (e) {
+        tried.push({ base, error: e.message });
+        // 只有"连不上"才换下一个；侧车返回的业务错误直接抛，避免掩盖真问题
+        if (isConnectFailure(e) && bridges.length > 1) {
+          continue;
+        }
+        e.detail = { ...(e.detail || {}), tried };
+        throw e;
+      }
+    }
+    const diag = await this.ctx.store.inspectSpider().catch(() => ({}));
+    const needAndroid = diag.kind === 'android-hardened' || diag.kind === 'android-dex';
+    const err = new Error(
+      needAndroid
+        ? `该源是 Android 加固包，必须由 Android 侧车执行；当前侧车都连不上：${tried
+            .map((t) => `${t.base} (${t.error})`)
+            .join('；')}`
+        : `所有 spider 侧车都连不上：${tried.map((t) => `${t.base} (${t.error})`).join('；')}`,
+    );
+    err.code = 'SPIDER_UNREACHABLE';
+    err.detail = {
+      tried,
+      spiderKind: diag.kind,
+      fix: needAndroid
+        ? '先起 sidecar/android/docker-compose.redroid.yml，装 Host APK，再把 SPIDER_ANDROID_URL 指过去'
+        : '起 JVM 侧车 node scripts/jvm-sidecar.mjs，或检查 SPIDER_JVM_URL',
+    };
+    throw err;
+  }
+
+  async #request(base, method, params, src) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (process.env.SPIDER_TOKEN) headers['X-Nova-Token'] = process.env.SPIDER_TOKEN;
+    const res = await fetch(base + '/spider', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
-        site: { key: this.site.key, name: this.site.name, api: this.site.api, ext: this.site.ext, spiderJar: this.site.spiderJar },
+        site: {
+          key: this.site.key,
+          name: this.site.name,
+          api: this.site.api,
+          ext: this.site.ext,
+          spiderJar: this.site.spiderJar,
+          ...src,
+        },
         method,
         params,
       }),
@@ -118,7 +218,7 @@ export class SpiderBridgeAdapter {
       page: Number(r.page || pg),
       tookMs: Date.now() - started,
       runtime: 'jar-spider',
-      engine: this.bridge,
+      engine: this.engine || null,
     };
   }
 
@@ -131,7 +231,7 @@ export class SpiderBridgeAdapter {
       page: Number(r.page || 1),
       tookMs: Date.now() - started,
       runtime: 'jar-spider',
-      engine: this.bridge,
+      engine: this.engine || null,
     };
   }
 

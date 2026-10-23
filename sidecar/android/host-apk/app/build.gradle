@@ -1,0 +1,50 @@
+plugins {
+  id 'com.android.application'
+}
+
+android {
+  namespace 'novatv.host'
+  compileSdk 34
+
+  defaultConfig {
+    applicationId 'novatv.host'
+    minSdk 21
+    // targetSdk 故意压到 23：
+    //   加固壳拿到 .so 后往往用 System.load(绝对路径) 加载（而不是 loadLibrary），
+    //   Android 7(API 24) 起 linker namespace 会拒绝从 app 可写目录 dlopen，
+    //   只有 targetSdk <= 23 才走宽松策略。压到 23 是这类"动态加载 native 库"
+    //   的通行做法，副作用仅是老权限模型（对只做 HTTP 服务的侧车无影响）。
+    //   redroid 是 Android 13，最低可安装 targetSdk 就是 23，装得上。
+    targetSdk 23
+    versionCode 1
+    versionName '1.0'
+    // 加固包的解密库只有 arm：x86 模拟器加载不了。
+    // 真正的 ABI 由 scripts/extract-spider-libs.mjs 从包里读 ELF header 决定，
+    // 这里只是把可能的 ABI 都留上，避免构建期被裁掉。
+    ndk {
+      abiFilters 'arm64-v8a', 'armeabi-v7a'
+    }
+  }
+
+  buildTypes {
+    release {
+      minifyEnabled false
+    }
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  // 加固包的 .so 不会被 DexClassLoader 解压，必须随 APK 一起打进 jniLibs
+  sourceSets {
+    main {
+      jniLibs.srcDirs = ['src/main/jniLibs']
+    }
+  }
+}
+
+dependencies {
+  // 故意不引任何依赖：HTTP 用 ServerSocket，JSON 用 Android 内置 org.json
+}

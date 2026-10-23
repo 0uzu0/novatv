@@ -1,0 +1,100 @@
+# ============================================================================
+# NovaTV · redroid（Android in Docker）侧车
+#
+# 用途：跑加固 spider（csp_*Guard）。这是让它跑起来的唯一途径——
+#      加固包的 classes.dex 只是壳，真实字节码在 assets/*.guard 里，
+#      由 ARM 的 .so 解密后交给 ART。JVM / Node 永远拿不到。
+#
+# 前置条件（必须先跑预检，别跳过）：
+#   sudo bash sidecar/android/preflight.sh
+#
+# ---------------------------------------------------------------------------
+# 两种形态，按宿主架构选，选错了必然失败
+# ---------------------------------------------------------------------------
+#
+# 形态 A：宿主是 ARM64（群晖 DS223、威联通 TS-133、Apple Silicon、ARM 云主机）
+#   直接起，ABI 天然匹配：
+#     docker compose -f sidecar/android/docker-compose.redroid.yml up -d
+#
+# 形态 B：宿主是 x86_64（绝大多数群晖/威联通）
+#   加固包的 .so 只有 armeabi-v7a / arm64-v8a，**没有 x86 版本**。
+#   所以必须让容器以 arm64 运行，靠内核 binfmt + QEMU 用户态转译。
+#   先注册 binfmt（只需一次）：
+#     docker run --privileged --rm tonistiigi/binfmt --install arm64
+#   再起：
+#     docker compose -f sidecar/android/docker-compose.redroid.yml up -d
+#
+#   预期：ART 冷启动 5~15 分钟（QEMU 逐条翻译 ARM 指令），
+#         单次 spider 调用可能数十秒，内存占用会翻倍。
+#         能用，但不适合当日常主力；有闲置安卓手机的话那条路更划算。
+#
+# ---------------------------------------------------------------------------
+# 宿主准备（每次重启后都要做，建议写进开机脚本）
+# ---------------------------------------------------------------------------
+#   modprobe binder_linux devices="binder,hwbinder,vndbinder"
+#   mkdir -p /dev/binderfs
+#   mount -t binder binder /dev/binderfs
+#
+#   ashmem：内核 >= 5.4 用 memfd 替代，无需额外模块。
+#
+# 如果 modprobe 报 "module not found"：宿主内核没有 binder 驱动，
+# 群晖/威联通默认就是如此，且无法通过装套件解决——只能换 ARM 设备或真机。
+# ============================================================================
+
+services:
+  redroid:
+    # 13.0.0_arm64：Android 13 + 只有 64 位 ARM。
+    # 加固包的 v7 库是 32 位，但 13 的 64only 镜像仍能通过 native bridge 处理，
+    # 若遇到 32 位加载失败，换 13.0.0_arm（含 32/64 双 ABI）：
+    #   image: redroid/redroid:13.0.0_arm
+    image: redroid/redroid:13.0.0_arm64
+    # x86_64 宿主靠这一行触发 QEMU 转译；ARM 宿主上写不写都一样
+    platform: linux/arm64
+    container_name: novatv-redroid
+    restart: unless-stopped
+
+    # redroid 必须特权：要挂 binderfs、改 netns、加载内核接口
+    privileged: true
+
+    ports:
+      # adb：装 APK、看 logcat 都靠它
+      - "5555:5555"
+
+    volumes:
+      # Android 的 /data 必须持久化，否则每次重启 APK 都要重装
+      - ./data:/data
+      # binder IPC。宿主已 mount binderfs 时这行才有意义
+      - /dev/binderfs:/dev/binderfs
+
+    environment:
+      TZ: Asia/Shanghai
+
+    command:
+      - androidboot.redroid_width=1080
+      - androidboot.redroid_height=1920
+      - androidboot.redroid_dpi=420
+      # guest：软件渲染。NAS 无 GPU，用 host 会直接失败
+      - androidboot.redroid_gpu_mode=guest
+      # 让 adb 认出来，方便排查
+      - androidboot.redroid_adbd=1
+
+    # QEMU 下启动很慢，给足 10 分钟；健康检查只看 adb 端口是否在听
+    healthcheck:
+      test: ["CMD-SHELL", "echo > /dev/tcp/127.0.0.1/5555 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 600s
+      retries: 5
+
+    # redroid 内部没有 init 之外的进程管理，oom 时别拖垮宿主
+    deploy:
+      resources:
+        limits:
+          # ART + 加固壳 + QEMU 转译，2G 是下限
+          memory: 3G
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
