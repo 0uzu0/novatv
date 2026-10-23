@@ -39,6 +39,7 @@ node server/index.js
 npm run dev            # node --watch 热重载
 npm run validate       # 端到端验证（20 个用例）
 npm run sidecar:jvm    # 编译并启动 JVM 侧车（:8899），加载未加固 jar
+npm run docker:preflight   # 没装 docker 也能查：COPY 源、CRLF、镜像名、架构
 ```
 
 环境变量：

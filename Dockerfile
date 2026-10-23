@@ -20,14 +20,16 @@ LABEL org.opencontainers.image.title="NovaTV" \
       org.opencontainers.image.description="参考 DecoTV UI + TVBox 播放原理的前后端综合视频平台" \
       org.opencontainers.image.source="${GH_REPO}"
 
+# CONFIG_URL 故意不写进 ENV：默认值含中文域名，交给代码里的默认值更稳，
+# 需要改的时候用 docker run -e / compose 的 environment 传
 ENV NODE_ENV=production \
     PORT=8890 \
-    TZ=Asia/Shanghai \
-    CONFIG_URL=http://www.饭太硬.cc/tv
+    TZ=Asia/Shanghai
 
 # curl   → JS 运行时同步 HTTP
 # tini   → PID 1 正确转发信号，docker stop 不会留僵尸
 # tzdata → 日志时间与 NAS 一致
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates tzdata tini \
  && rm -rf /var/lib/apt/lists/* \

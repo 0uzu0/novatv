@@ -48,6 +48,17 @@ jobs:
           echo "✓ 全部通过"
       - name: package.json 合法性
         run: node -e "JSON.parse(require('fs').readFileSync('package.json','utf8'))" && echo "✓ package.json"
+      # 提前抓 COPY 源缺失、CRLF、被 .dockerignore 误排除、基础镜像架构缺失
+      - name: Docker 预检
+        run: node scripts/docker-preflight.mjs
+      # 编排文件写错的话，NAS 上才会炸；这里用真 docker compose 解析一遍
+      - name: compose 语法
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml config > /dev/null
+          echo "✓ docker-compose.yml"
+          docker compose -f docker-compose.yml -f docker-compose.sidecar.yml config > /dev/null
+          echo "✓ 叠加 sidecar"
 
   build:
     needs: lint
