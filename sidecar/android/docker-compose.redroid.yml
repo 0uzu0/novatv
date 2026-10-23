@@ -63,8 +63,12 @@ services:
     volumes:
       # Android 的 /data 必须持久化，否则每次重启 APK 都要重装
       - ./data:/data
-      # binder IPC。宿主已 mount binderfs 时这行才有意义
-      - /dev/binderfs:/dev/binderfs
+      # binder IPC 挂载：
+      #   必须在宿主先 `mount -t binder binder /dev/binderfs` 之后再启用这一行。
+      #   如果宿主没挂 binderfs，这一行会让容器里出现一个普通空目录，
+      #   redroid 启动时会因为拿不到 binder 设备而反复重启——
+      #   与其猜，不如先跑 preflight.sh 确认，再决定是否放开注释。
+      # - /dev/binderfs:/dev/binderfs
 
     environment:
       TZ: Asia/Shanghai
@@ -78,13 +82,11 @@ services:
       # 让 adb 认出来，方便排查
       - androidboot.redroid_adbd=1
 
-    # QEMU 下启动很慢，给足 10 分钟；健康检查只看 adb 端口是否在听
-    healthcheck:
-      test: ["CMD-SHELL", "echo > /dev/tcp/127.0.0.1/5555 2>/dev/null || exit 1"]
-      interval: 30s
-      timeout: 5s
-      start_period: 600s
-      retries: 5
+    # 故意不写 healthcheck：
+    #   redroid 里是 AOSP 的 toybox sh，没有 bash，也就不支持 /dev/tcp 探测，
+    #   写了只会让容器永远 unhealthy。启动是否成功请从宿主侧确认：
+    #     adb connect <NAS_IP>:5555 && adb devices
+    #   QEMU 转译下首次启动 5~15 分钟才有 adb，别急着判定失败。
 
     # redroid 内部没有 init 之外的进程管理，oom 时别拖垮宿主
     deploy:

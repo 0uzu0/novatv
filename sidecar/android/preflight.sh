@@ -91,10 +91,8 @@ fi
 CFG_SRC=""
 if [ -r /proc/config.gz ]; then
   CFG_SRC=/proc/config.gz
-  CFG_CMD="zcat /proc/config.gz"
 elif [ -r "/boot/config-$(uname -r)" ]; then
   CFG_SRC="/boot/config-$(uname -r)"
-  CFG_CMD="cat /boot/config-$("uname" -r)"
 fi
 
 if [ -n "$CFG_SRC" ]; then
@@ -144,13 +142,20 @@ head_ "【2】ashmem / memfd"
 if [ -e /dev/ashmem ]; then
   ok "/dev/ashmem 存在"
 else
-  KV_MAJOR="$(uname -r | cut -d. -f1)"
-  KV_MINOR="$(uname -r | cut -d. -f2)"
-  if [ "${KV_MAJOR:-0}" -gt 5 ] || { [ "${KV_MAJOR:-0}" -eq 5 ] && [ "${KV_MINOR:-0}" -ge 4 ]; }; then
-    ok "内核 ${KV_MAJOR}.${KV_MINOR} 用 memfd 替代 ashmem，无需 /dev/ashmem"
-  else
-    soft "无 /dev/ashmem 且内核 < 5.4，可能需要 ashmem_linux 模块"
-  fi
+  KV_MAJOR="$(uname -r | cut -d. -f1 | tr -cd '0-9')"
+  KV_MINOR="$(uname -r | cut -d. -f2 | tr -cd '0-9')"
+  case "${KV_MAJOR}:${KV_MINOR}" in
+    *[!0-9:]*|:|*:)
+      soft "无法解析内核版本 $(uname -r)，ashmem 需人工确认"
+      ;;
+    *)
+      if [ "${KV_MAJOR}" -gt 5 ] || { [ "${KV_MAJOR}" -eq 5 ] && [ "${KV_MINOR}" -ge 4 ]; }; then
+        ok "内核 ${KV_MAJOR}.${KV_MINOR} 用 memfd 替代 ashmem，无需 /dev/ashmem"
+      else
+        soft "无 /dev/ashmem 且内核 < 5.4，可能需要 ashmem_linux 模块"
+      fi
+      ;;
+  esac
 fi
 
 # ---------------------------------------------------------------- 3. KVM
