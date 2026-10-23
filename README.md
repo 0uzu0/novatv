@@ -57,27 +57,33 @@ npm run docker:preflight   # 没装 docker 也能查：COPY 源、CRLF、镜像�
 
 ## Docker / NAS 部署
 
-镜像由 GitHub Actions 自动构建，双架构（amd64 / arm64），推就出品：
+仓库：**https://github.com/0uzu0/novatv**（私有）。镜像由 GitHub Actions 自动构建，
+双架构（amd64 / arm64），推就出品：
 
 ```
 push → lint → build（2 镜像 × 2 架构 → GHCR）→ smoke（真跑容器验健康检查）
 ```
 
-NAS 上三步：
+NAS 上两条路，任选一条：
 
 ```bash
-cp .env.example .env && vi .env        # 只需要改 GHCR_OWNER
-docker compose pull
-docker compose up -d                   # http://<NAS-IP>:8890
+# A. 本地构建（推荐，私有仓库不用折腾 GHCR 登录）
+git clone https://github.com/0uzu0/novatv.git && cd novatv
+cp .env.example .env && vi .env       # 只需改 PUID/PGID
+docker compose up -d --build          # http://<NAS-IP>:8890
+
+# B. 拉 CI 构建好的镜像（先把 Package 改成 public，或 NAS 上 docker login ghcr.io）
+cp .env.example .env && vi .env
+docker compose pull && docker compose up -d
 ```
 
 需要 JVM 侧车时叠加一层（会自动把主服务的 `SPIDER_JVM_URL` 指过去）：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.sidecar.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.sidecar.yml up -d --build
 ```
 
-完整步骤、GHCR 可见性设置、群晖/威联通图形入口、升级回滚与排障
+完整步骤、PAT 获取、群晖/威联通图形入口、把开源 spider 产物搬上 NAS、升级回滚与排障
 见 **[docs/DEPLOY.md](docs/DEPLOY.md)**。
 
 ## 目录结构

@@ -152,7 +152,10 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           platforms: ${{ steps.plat.outputs.value }}
-          push: ${{ github.event_name != 'pull_request' && (inputs.push_image != false) }}
+          # 只在 PR 上不推。这里刻意用 github.event.inputs（字符串）而不是 inputs（对象）：
+          # push 事件下 inputs 为空，`inputs.push_image != false` 会被当成 `'' != false`，
+          # 两边都转成 0 后结果为 false —— 曾经因此静默跳过推送，smoke 拉不到镜像。
+          push: ${{ github.event_name != 'pull_request' && github.event.inputs.push_image != 'false' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.scope }}

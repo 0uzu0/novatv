@@ -1,9 +1,16 @@
 # NovaTV —— NAS / Docker 部署编排
 #
-#   1) 复制环境变量模板：cp .env.example .env && vi .env
-#   2) 拉镜像并启动：  docker compose pull && docker compose up -d
-#   3) 打开：          http://<NAS-IP>:8890
+# 两种启动方式，任选一种：
 #
+#   A) 本地构建（推荐，不需要登录 GHCR，私有仓库也能用）
+#      cp .env.example .env
+#      docker compose up -d --build
+#
+#   B) 拉 CI 构建好的镜像（仓库改成公开、或先在 NAS 上 docker login ghcr.io）
+#      cp .env.example .env
+#      docker compose pull && docker compose up -d
+#
+# 打开：http://<NAS-IP>:8890
 # 想额外启用 JVM 侧车（跑未加固 spider jar）见 docker-compose.sidecar.yml。
 
 name: novatv
@@ -11,7 +18,14 @@ name: novatv
 services:
   novatv:
     # GHCR 的镜像名必须全小写；账号有大写字母时在 .env 里写小写形式
-    image: ghcr.io/${GHCR_OWNER:-your-github-name}/novatv:${NOVATV_TAG:-latest}
+    image: ghcr.io/${GHCR_OWNER:-0uzu0}/novatv:${NOVATV_TAG:-latest}
+    # build 段留着，方式 A 走的就是它；方式 B 时 compose 会忽略 build 直接 pull
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
     container_name: novatv
     restart: unless-stopped
 
