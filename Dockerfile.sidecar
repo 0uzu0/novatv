@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1.7
+#
+# NovaTV JVM 侧车镜像（加载「未加固」spider jar）
+#   构建：docker build -f Dockerfile.sidecar -t novatv-sidecar:local .
+#
+# 注意边界：加固包（dex + .so + encrypted guard）在这里必然加载失败，
+# 那是 Android 侧车（sidecar/android）的活。这个镜像只解决普通 jar。
+#
+# 第一阶段用 JDK 编译（要 javac + jar），运行阶段只留 JRE，镜像小一半。
+
+FROM eclipse-temurin:21-jdk AS build
+
+WORKDIR /src
+
+COPY sidecar/jvm/src ./src
+COPY sidecar/jvm/demo ./demo
+
+RUN mkdir -p out/classes out/demo \
+ && find ./src -name '*.java' > sources.txt \
+ && javac -encoding UTF-8 -d out/classes @sources.txt \
+ && find ./demo -name '*.java' > demo-sources.txt \
+ && javac -encoding UTF-8 -cp out/classes -d out/demo @demo-sources.txt \
+ && jar cf out/demo-spider.jar -C out/demo .
+
+
+FROM eclipse-temurin:21-jre
+
+ARG GH_REPO=""
+
+LABEL org.opencontainers.image.title="NovaTV JVM Sidecar" \
+      org.opencontainers.image.description="用 URLClassLoader 在服务端跑 TVBox 未加固 spider jar" \
+      org.opencontainers.image.source="${GH_REPO}"
+
+# curl 仅用于容器健康检查
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl tzdata \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=build /src/out/classes /app/classes
+COPY --from=build /src/out/demo-spider.jar /app/jars/demo-spider.jar
+
+ENV TZ=Asia/Shanghai \
+    JVM_SIDECAR_PORT=8899 \
+    JVM_SIDECAR_HOST=0.0.0.0 \
+    NOVA_SPIDER_JAR=/app/jars/demo-spider.jar
+
+# 想挂自己的 jar：-v /path/on/nas/spider.jar:/app/jars/custom.jar \
+#               -e NOVA_SPIDER_JAR=/app/jars/custom.jar
+# （这里不用 VOLUME 指令，避免 compose 里凭空多出匿名卷）
+
+EXPOSE 8899
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -fsS "http://127.0.0.1:8899/health" >/dev/null || exit 1
+
+# MaxRAMPercentage 而不是固定 -Xmx：NAS 内存大小不可控，让它按容器 limit 走
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=60", "-Dfile.encoding=UTF-8", \
+            "-cp", "/app/classes", "novatv.Sidecar"]

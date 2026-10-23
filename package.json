@@ -1,0 +1,20 @@
+{
+  "name": "novatv",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "description": "NovaTV — 参考 DecoTV UI + TVBox 播放原理的前后端综合视频平台",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "mock": "node fixtures/mock-cms.js",
+    "validate": "node scripts/validate.mjs",
+    "sidecar:jvm": "node scripts/jvm-sidecar.mjs",
+    "sidecar:jvm:build": "node scripts/jvm-sidecar.mjs --build",
+    "probe:js": "node scripts/js-rt-probe.mjs",
+    "docker:build": "docker build -t novatv:local . && docker build -f Dockerfile.sidecar -t novatv-sidecar:local .",
+    "docker:up": "docker compose up -d",
+    "docker:logs": "docker compose logs -f"
+  }
+}

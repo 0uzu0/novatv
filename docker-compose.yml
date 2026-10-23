@@ -1,0 +1,50 @@
+# NovaTV —— NAS / Docker 部署编排
+#
+#   1) 复制环境变量模板：cp .env.example .env && vi .env
+#   2) 拉镜像并启动：  docker compose pull && docker compose up -d
+#   3) 打开：          http://<NAS-IP>:8890
+#
+# 想额外启用 JVM 侧车（跑未加固 spider jar）见 docker-compose.sidecar.yml。
+
+name: novatv
+
+services:
+  novatv:
+    # GHCR 的镜像名必须全小写；账号有大写字母时在 .env 里写小写形式
+    image: ghcr.io/${GHCR_OWNER:-your-github-name}/novatv:${NOVATV_TAG:-latest}
+    container_name: novatv
+    restart: unless-stopped
+
+    # 与宿主机目录属主对齐，避免 /app/data 写不进去（群晖常见 uid=1026）
+    user: "${PUID:-1000}:${PGID:-1000}"
+
+    ports:
+      - "${NOVATV_PORT:-8890}:8890"
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      PORT: "8890"
+      # 接口地址（支持图片藏 base64 的载体，直接填原始 URL 即可）
+      CONFIG_URL: ${CONFIG_URL:-http://www.饭太硬.cc/tv}
+      # 可选：额外配置聚合，逗号分隔；主配置的 jar 源跑不动时用它补 CMS 源
+      CONFIG_URLS: ${CONFIG_URLS:-}
+      # 只有启用了 docker-compose.sidecar.yml 才需要
+      SPIDER_JVM_URL: ${SPIDER_JVM_URL:-}
+
+    volumes:
+      # 配置解码快照 + JS 运行时模块缓存，删掉只是下次启动慢一点
+      - ./data:/app/data
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8890/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+
+    # NAS 硬盘小，日志必须限流，否则几个月就撑爆
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>NovaTV · 聚合影视</title>
+<meta name="description" content="NovaTV —— 参考 DecoTV 的界面设计与 TVBox 的播放原理构建的前后端聚合视频平台" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%237c5cff'/><stop offset='1' stop-color='%2339d3ff'/></linearGradient></defs><rect width='100' height='100' rx='24' fill='url(%23g)'/><path d='M38 30l28 20-28 20z' fill='white'/></svg>" />
+<link rel="stylesheet" href="/css/app.css" />
+</head>
+<body>
+<div class="app-shell">
+  <aside class="rail" id="rail">
+    <a class="rail-logo" href="#/home" aria-label="NovaTV 首页">
+      <svg viewBox="0 0 40 40" width="30" height="30" aria-hidden="true">
+        <defs>
+          <linearGradient id="logoGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#7c5cff"/><stop offset="1" stop-color="#39d3ff"/>
+          </linearGradient>
+        </defs>
+        <rect x="1" y="1" width="38" height="38" rx="11" fill="url(#logoGrad)"/>
+        <path d="M15 12l12 8-12 8z" fill="#fff" opacity=".95"/>
+      </svg>
+    </a>
+    <nav class="rail-nav" id="railNav">
+      <button class="rail-btn" data-nav="home" title="首页">
+        <svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V21H3z"/></svg>
+      </button>
+      <button class="rail-btn" data-nav="search" title="搜索">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      </button>
+      <button class="rail-btn" data-nav="live" title="直播">
+        <svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="13" rx="2"/><path d="m8 2 4 4 4-4"/></svg>
+      </button>
+      <button class="rail-btn" data-nav="sources" title="播放源">
+        <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+      </button>
+      <button class="rail-btn" data-nav="diag" title="诊断">
+        <svg viewBox="0 0 24 24"><path d="M3 12h4l3 7 4-14 3 7h4"/></svg>
+      </button>
+    </nav>
+    <div class="rail-foot">
+      <button class="rail-btn" id="themeBtn" title="切换主题">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="brand-mobile">
+        <svg viewBox="0 0 40 40" width="26" height="26" aria-hidden="true">
+          <defs><linearGradient id="logoGrad2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7c5cff"/><stop offset="1" stop-color="#39d3ff"/></linearGradient></defs>
+          <rect x="1" y="1" width="38" height="38" rx="11" fill="url(#logoGrad2)"/><path d="M15 12l12 8-12 8z" fill="#fff" opacity=".95"/>
+        </svg>
+        <span>NovaTV</span>
+      </div>
+      <form class="searchbar" id="searchForm" role="search">
+        <svg viewBox="0 0 24 24" class="ico"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="searchInput" type="search" placeholder="搜索影片、剧集、直播频道…" autocomplete="off" />
+        <kbd>Enter</kbd>
+      </form>
+      <div class="topbar-right">
+        <button class="ghost-btn" id="refreshBtn" title="刷新接口配置">
+          <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
+          <span>刷新配置</span>
+        </button>
+        <a class="ghost-btn" href="#/diag" title="运行时诊断">
+          <svg viewBox="0 0 24 24"><path d="M3 12h4l3 7 4-14 3 7h4"/></svg>
+          <span>诊断</span>
+        </a>
+      </div>
+    </header>
+
+    <main id="view" class="view"></main>
+
+    <footer class="footer">
+      <span>NovaTV · 界面参考 <b>DecoTV</b>，播放链路参考 <b>TVBox</b></span>
+      <span class="dot">·</span>
+      <span>本站仅做技术演示，不存储、不提供任何片源</span>
+    </footer>
+  </div>
+</div>
+
+<nav class="tabbar">
+  <button data-nav="home"><svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V21H3z"/></svg><span>首页</span></button>
+  <button data-nav="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span>搜索</span></button>
+  <button data-nav="live"><svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="13" rx="2"/><path d="m8 2 4 4 4-4"/></svg><span>直播</span></button>
+  <button data-nav="sources"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg><span>源</span></button>
+</nav>
+
+<div class="player-layer" id="playerLayer" hidden></div>
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script src="/vendor/hls.min.js"></script>
+<script src="/vendor/mpegts.js"></script>
+<script src="/js/player.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

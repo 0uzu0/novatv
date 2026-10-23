@@ -1,0 +1,44 @@
+# 可选叠加层：JVM 侧车
+#
+#   docker compose -f docker-compose.yml -f docker-compose.sidecar.yml up -d
+#
+# 作用：把「未加固」的 spider jar 跑起来（普通 class 文件，JVM 能加载）。
+# 加固包（dex + .so + guard）这个容器也跑不了，那必须走 sidecar/android。
+# 启动后主服务的 /api/runtime 里 jar-spider 会变成 available。
+
+name: novatv
+
+services:
+  novatv:
+    environment:
+      # 同一 compose 网络内用服务名，别写 127.0.0.1（那是容器自己）
+      SPIDER_JVM_URL: http://novatv-sidecar:8899
+
+  novatv-sidecar:
+    image: ghcr.io/${GHCR_OWNER:-your-github-name}/novatv-sidecar:${NOVATV_TAG:-latest}
+    container_name: novatv-sidecar
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      JVM_SIDECAR_PORT: "8899"
+      JVM_SIDECAR_HOST: 0.0.0.0
+      NOVA_SPIDER_JAR: /app/jars/demo-spider.jar
+
+    # 换成自己的 jar 时打开（宿主路径 : 容器路径 : 只读）
+    # volumes:
+    #   - ./jars/my-spider.jar:/app/jars/demo-spider.jar:ro
+
+    # 只给内网用，不映射端口到宿主机
+    expose:
+      - "8899"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8899/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

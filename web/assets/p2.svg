@@ -1,0 +1,20 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='400' height='600' viewBox='0 0 400 600'>
+<defs>
+  <linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#ff7a59'/><stop offset='1' stop-color='#ffc35c'/></linearGradient>
+  <linearGradient id='d' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#05060a' stop-opacity='0'/><stop offset='1' stop-color='#05060a' stop-opacity='.92'/></linearGradient>
+  <filter id='b'><feGaussianBlur stdDeviation='38'/></filter>
+</defs>
+<rect width='400' height='600' fill='#0b0d14'/>
+<circle cx='90' cy='120' r='150' fill='url(#g)' opacity='.55' filter='url(#b)'/>
+<circle cx='330' cy='430' r='170' fill='url(#g)' opacity='.38' filter='url(#b)'/>
+<g stroke='white' stroke-opacity='.10' stroke-width='1'>
+  <path d='M0 420 Q200 340 400 430'/><path d='M0 450 Q200 375 400 460'/><path d='M0 480 Q200 410 400 490'/>
+</g>
+<text x='200' y='300' text-anchor='middle' font-family='PingFang SC,Microsoft YaHei,sans-serif' font-size='150' font-weight='800' fill='white' fill-opacity='.10' letter-spacing='-8'>流光</text>
+<rect width='400' height='600' fill='url(#d)'/>
+<text x='32' y='70' font-family='Inter,Arial' font-size='12' letter-spacing='4' fill='#ffc35c' opacity='.9'>DEMO SERIES</text>
+<text x='32' y='470' font-family='PingFang SC,Microsoft YaHei,sans-serif' font-size='54' font-weight='800' fill='#fff'>流光</text>
+<text x='32' y='532' font-family='PingFang SC,Microsoft YaHei,sans-serif' font-size='54' font-weight='800' fill='#fff' fill-opacity='.55'>之城</text>
+<rect x='32' y='556' width='42' height='3' rx='2' fill='url(#g)'/>
+<text x='32' y='584' font-family='Inter,Arial' font-size='11' letter-spacing='2.5' fill='#ffffff' fill-opacity='.45'>NOVATV · DEMO</text>
+</svg>

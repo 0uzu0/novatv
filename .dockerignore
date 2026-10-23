@@ -1,0 +1,15 @@
+# 构建上下文瘦身：镜像里只放运行必需的东西
+.git
+.github
+.gitignore
+node_modules
+data
+reports
+sidecar/jvm/build
+sidecar/android
+docs/screenshots
+**/*.log
+.env
+.env.*
+*.md
+!README.md

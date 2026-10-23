@@ -1,0 +1,34 @@
+# Android 侧车：跑加固 spider（csp_*）的唯一现实方案
+#
+# 为什么需要它：
+#   饭太硬这类配置的 spider 包是 Android 加固产物（classes.dex 仅 ~37KB，
+#   真正逻辑在 assets/ftyshinidie.guard 1.3MB，运行时由 ftyguard_v7/v8.so 解密）。
+#   JVM / Node / QuickJS 都拿不到字节码，只有 ART（Android Runtime）能跑。
+#
+# 用法：
+#   docker compose up -d
+#   adb connect 127.0.0.1:5555
+#   adb install -r host-apk/build/novatv-host.apk
+#   adb push spider.jar /sdcard/Android/data/novatv.host/files/spider.jar
+#   adb shell am start-foreground-service -n novatv.host/.HostService
+#   adb forward tcp:8898 tcp:8899
+#   然后主服务：SPIDER_ANDROID_URL=http://127.0.0.1:8898 npm start
+#
+# 注意 ABI：ft yguard_v7/v8.so 是 armeabi-v7a / arm64-v8a。
+#   - ARM 宿主机（Apple Silicon、ARM 云服务器）→ 直接用 redroid 镜像
+#   - x86 宿主机 → 要么用支持 arm 转译的镜像，要么换真机 / ARM 云机（推荐）
+
+services:
+  redroid:
+    image: redroid/redroid:13.0.0_arm64
+    container_name: novatv-redroid
+    privileged: true
+    ports:
+      - "5555:5555"
+    volumes:
+      - ./data:/data
+    command:
+      - androidboot.redroid_width=1080
+      - androidboot.redroid_height=1920
+      - androidboot.redroid_dpi=420
+      - androidboot.redroid_gpu_mode=guest

@@ -1,0 +1,196 @@
+name: docker
+
+# 打包 → 推 GHCR → 冒烟测试。NAS 上 docker compose pull 即可。
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: '构建平台（只给自家 NAS 用可填 linux/amd64，能快一倍）'
+        required: false
+        default: 'linux/amd64,linux/arm64'
+      push_image:
+        description: '推送镜像到 GHCR'
+        type: boolean
+        required: false
+        default: true
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+jobs:
+  # 先做语法检查：三分钟能发现的问题，别浪费一次十分钟的多架构构建
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 语法检查（零依赖，无需 npm install）
+        run: |
+          set -e
+          fail=0
+          for f in $(find server fixtures scripts -name '*.js' -o -name '*.mjs'); do
+            if ! node --check "$f"; then echo "✘ $f"; fail=1; fi
+          done
+          if [ "$fail" != "0" ]; then exit 1; fi
+          echo "✓ 全部通过"
+      - name: package.json 合法性
+        run: node -e "JSON.parse(require('fs').readFileSync('package.json','utf8'))" && echo "✓ package.json"
+
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: novatv
+            dockerfile: Dockerfile
+            scope: novatv
+          - name: novatv-sidecar
+            dockerfile: Dockerfile.sidecar
+            scope: novatv-sidecar
+    outputs:
+      owner: ${{ steps.repo.outputs.owner }}
+      short_sha: ${{ steps.repo.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR 不接受大写，而 github.repository_owner 可能带大写
+      - name: 规范化镜像名
+        id: repo
+        run: |
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: 解析构建平台
+        id: plat
+        run: |
+          P="${{ inputs.platforms }}"
+          if [ -z "$P" ]; then P="linux/amd64,linux/arm64"; fi
+          echo "value=$P" >> "$GITHUB_OUTPUT"
+          echo "平台：$P"
+
+      # 镜像地址可能是 1 个（GHCR）或 2 个（GHCR + Docker Hub）
+      - name: 计算镜像地址
+        id: ref
+        run: |
+          IMAGES="${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/${{ matrix.name }}"
+          if [ -n "$DOCKERHUB_USERNAME" ]; then
+            IMAGES="$IMAGES"$'\n'"docker.io/$DOCKERHUB_USERNAME/${{ matrix.name }}"
+          fi
+          {
+            echo "images<<__EOF__"
+            echo "$IMAGES"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 配了 Docker Hub 凭据就顺手推一份（公开仓库 NAS 拉取不用登录）
+      - name: 登录 Docker Hub（可选）
+        if: github.event_name != 'pull_request' && env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: 生成标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.ref.outputs.images }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=short,prefix=sha-
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ steps.plat.outputs.value }}
+          push: ${{ github.event_name != 'pull_request' && (inputs.push_image != false) }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.scope }}
+          # 老版本 Docker（群晖 DSM 20.x 自带的 20.10）对带 attestation 的
+          # OCI index 支持不好，关掉 provenance 兼容性最稳
+          provenance: false
+          build-args: |
+            GH_REPO=${{ github.server_url }}/${{ github.repository }}
+
+  # 真把镜像跑起来验一遍：避免"构建成功但启动即崩"
+  smoke:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 拉起容器
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ needs.build.outputs.owner }}/novatv:sha-${{ needs.build.outputs.short_sha }}"
+          echo "image=$IMAGE"
+          docker run -d --name nova -p 8890:8890 "$IMAGE"
+
+      - name: 等待就绪并验证
+        run: |
+          set -e
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8890/api/health >/dev/null 2>&1; then
+              echo "✓ 服务已就绪"; break
+            fi
+            if [ "$i" = "30" ]; then echo "✘ 60s 未就绪"; docker logs nova; exit 1; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8890/api/health | tee /tmp/health.json; echo
+          # 首页与本地化的播放器脚本必须真的能取到
+          curl -fsS -o /dev/null -w "index:%{http_code} " http://127.0.0.1:8890/
+          curl -fsS -o /dev/null -w "app.js:%{http_code} " http://127.0.0.1:8890/js/app.js
+          curl -fsS -o /dev/null -w "hls:%{http_code}\n" http://127.0.0.1:8890/vendor/hls.min.js
+          grep -q '"ok":true' /tmp/health.json
+
+      - name: 失败时倒日志
+        if: failure()
+        run: docker logs nova || true

@@ -1,0 +1,14 @@
+# 运行期产物，不入库（容器里由卷挂载出来）
+# 保留目录本身，否则 git clone 后 docker 会以 root 身份创建 data/，导致容器内写不进去
+data/*
+!data/.gitkeep
+reports/*.json
+sidecar/jvm/build/
+
+# 本地环境
+.env
+.env.local
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
