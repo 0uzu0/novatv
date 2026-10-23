@@ -54,6 +54,11 @@ Host APK（手机 / TV 盒子 / redroid 里的 ART）
 >
 > N1 专用编排（720p / 1.2G 上限，通用版 3G 在 2GB 内存的 N1 上必然 OOM）：
 > `docker-compose.redroid-n1.yml`
+>
+> **NAS 是 Intel / AMD（x86_64）？** 看 [`X86-NAS.md`](X86-NAS.md)。
+> 加固包只有 ARM 的 `.so`，x86 上必须走 Native Bridge：
+> `docker-compose.redroid-x86.yml`（自带 libndk_translation 的镜像）。
+> 能跑，但加固壳检测到模拟器时会失败，成功率明显低于真机。
 
 ### 形态 A：手机直连（不用电脑，推荐）
 

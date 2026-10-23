@@ -1,0 +1,77 @@
+# ============================================================================
+# NovaTV · redroid 侧车（x86_64 NAS 专用，Intel / AMD）
+#
+# 适用：NAS 是 Intel 8505 / N100 / N305 这类 x86_64 芯片，且系统是自建
+#       Linux（Debian / Ubuntu / Unraid / TrueNAS SCALE），不是群晖 DSM 或
+#       威联通 QTS（那两家内核不给 binder，装模块要重编内核，别折腾）。
+#
+# 为什么是这份镜像：加固包的 native 库只有 ARM 版本（ftyguard_v7.so = ELF32
+#   ARMv7，ftyguard_v8.so = ELF64 AArch64），x86_64 上要跑必须靠「Native Bridge」
+#   做指令翻译。普通 redroid/redroid:*_amd64 镜像不带翻译层，adb install 会直接
+#   报 INSTALL_FAILED_NO_MATCHING_ABIS；下面这个 tag 自带 libndk_translation。
+#
+# 镜像选择（按成功率排序，失败就往下换一个）：
+#   1. erstt/redroid:11.0.0_ndk_ChromeOS   NDK 翻译 0.2.2，作者标注 Intel/AMD 稳定
+#   2. erstt/redroid:12.0.0_ndk_ChromeOS   NDK 翻译 0.2.3
+#   3. erstt/redroid:11.0.0_houdini_ChromeOS  Houdini（Intel 专有，32 位 ARM 也能翻）
+#   NDK 只翻 arm64-v8a；Houdini 同时翻 armeabi-v7a。我们的 APK 两个 ABI 都带，
+#   64 位进程会优先走 arm64-v8a，所以 1 号先试。
+#
+# 前置（必须，否则容器秒退）：
+#   1) 宿主内核要有 binder：
+#        ls /lib/modules/$(uname -r)/kernel/drivers/android/ 2>/dev/null
+#        sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+#      没有模块就先装：sudo apt install linux-modules-extra-$(uname -r)
+#   2) 宿主要有 binfmt_misc（libndk 靠它把 arm ELF 转给翻译层）：
+#        sudo modprobe binfmt_misc
+#   3) 校验：sudo bash sidecar/android/preflight.sh
+#
+# 启动：
+#   docker compose -f sidecar/android/docker-compose.redroid-x86.yml up -d
+#   adb connect NAS_IP:5555
+#   bash sidecar/android/n1-setup.sh NAS_IP novatv123   # 脚本本身与架构无关
+#
+# 说明：本编排未经 x86 真机验证（开发机无 Docker）。镜像 tag 与 command 参数
+#   取自 redroid-doc 与 erstt/redroid 的官方说明。
+# ============================================================================
+
+services:
+  redroid:
+    image: erstt/redroid:11.0.0_ndk_ChromeOS
+    platform: linux/amd64
+    container_name: novatv-redroid-x86
+    restart: unless-stopped
+
+    # redroid 要在容器内挂 binderfs 和 binfmt_misc，没有 privileged 起不来
+    privileged: true
+
+    ports:
+      - "5555:5555"   # adb：只有侧车安装阶段用得到
+
+    volumes:
+      # Android /data 必须持久化，否则每次重启都要重装 APK
+      - ./data-x86:/data
+
+    environment:
+      TZ: Asia/Shanghai
+
+    command:
+      # 侧车不需要画面（浏览器播的是 m3u8，不是安卓界面），
+      # 分辨率与帧率压到最低，把 CPU 全留给 ART
+      - androidboot.redroid_width=720
+      - androidboot.redroid_height=1280
+      - androidboot.redroid_dpi=320
+      - androidboot.redroid_fps=5
+      # 无 GPU 直通时用软渲染；8505 的 iGPU 要直通得映射 /dev/dri，收益不大
+      - androidboot.redroid_gpu_mode=guest
+      # 内核 >= 5.4 用 memfd 替代已废弃的 ashmem
+      - androidboot.use_memfd=true
+      - androidboot.redroid_adbd=1
+      # 调试期可临时打开，让 adb shell 直接是 root（装完建议关掉）
+      # - ro.secure=0
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"

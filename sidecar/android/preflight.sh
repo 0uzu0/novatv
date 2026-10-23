@@ -252,14 +252,25 @@ EOF
       ;;
     x86_64)
       cat <<EOF
-  ${YEL}宿主是 x86_64，但加固包只带 ARM 的 .so，必须靠 QEMU 用户态转译：${RST}
-    1) 先注册 binfmt：
+  ${YEL}宿主是 x86_64，加固包只带 ARM 的 .so，必须靠翻译层。两条，优先第 1 条：${RST}
+
+  ${GRN}1) Native Bridge（推荐，接近原生速度）${RST}
+       x86 的 redroid 有自带 libndk_translation / libhoudini 的镜像，
+       装 arm64 APK 时由系统把 arm 指令就地翻译，不需要 qemu 全栈模拟：
+       docker compose -f sidecar/android/docker-compose.redroid-x86.yml up -d
+       装完必须确认走了翻译：adb shell dumpsys package novatv.host | grep -i abi
+       应显示 primaryCpuAbi=arm64-v8a；若显示 x86_64 或报 NO_MATCHING_ABIS，
+       说明该镜像不带翻译层，换 erstt/redroid:*_houdini_* tag。
+       详见 sidecar/android/X86-NAS.md
+
+  ${YEL}2) QEMU 用户态模拟（能跑但很慢，仅作兜底）${RST}
        docker run --privileged --rm tonistiigi/binfmt --install arm64
-    2) 起 arm64 的 redroid：
        docker compose -f sidecar/android/docker-compose.redroid.yml up -d
-    3) 心理预期：ART + 加固壳在 QEMU 下启动可能 5~15 分钟，
-       单次 spider 调用可能数十秒。能跑通，但别指望流畅。
-    ${DIM}更稳的替代：一台旧安卓手机，成功率 100%。${RST}
+       心理预期：ART + 加固壳启动 5~15 分钟，单次 spider 调用可能数十秒。
+
+  ${DIM}注意：Native Bridge 同样要求内核有 binder_linux 与 binfmt_misc；
+        群晖 DSM / 威联通 QTS 基本无解。${RST}
+  ${DIM}成功率最高仍是：一台旧安卓手机 / TV 盒子，100%。${RST}
 EOF
       ;;
     *)
