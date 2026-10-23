@@ -35,8 +35,9 @@ grn() { printf '\033[32m%s\033[0m\n' "$*"; }
 ylw() { printf '\033[33m%s\033[0m\n' "$*"; }
 step() { printf '\n\033[36m== %s ==\033[0m\n' "$*"; }
 
-if [ -z "$IP" ]; then
+if [ -z "$IP" ] && [ -z "${ADB_SERIAL:-}" ]; then
   red "用法: bash sidecar/android/install-apk.sh <设备IP> [token] [端口]"
+  echo "  走 USB 线时可省掉 IP：ADB_SERIAL=<序列号> bash $0 '' novatv123"
   exit 1
 fi
 
@@ -56,20 +57,54 @@ fi
 grn "adb: $ADB"
 
 # ---------------------------------------------------------------- 1 连接
-step "1/5 连接设备 $IP:$ADB_PORT"
-"$ADB" connect "$IP:$ADB_PORT" 2>&1 | sed 's/^/  /'
+# ADB_SERIAL 非空 → 直接用它（USB 直连，或已手动连好的无线设备），跳过 connect。
+# 空 → 走网络 ADB：adb connect <IP>:<端口>。
+SERIAL="${ADB_SERIAL:-}"
+if [ -n "$SERIAL" ]; then
+  step "1/5 使用已连接设备 $SERIAL"
+else
+  step "1/5 连接设备 $IP:$ADB_PORT"
+  "$ADB" connect "$IP:$ADB_PORT" 2>&1 | sed 's/^/  /'
+  SERIAL="$IP:$ADB_PORT"
+fi
+
 DEVS="$("$ADB" devices | tr -d '\r' | awk -F'\t' 'NR>1 && $2=="device"{print $1}')"
-if ! printf '%s\n' "$DEVS" | grep -qx "$IP:$ADB_PORT"; then
-  red "连接失败。逐项检查："
-  echo "  - 设备与执行机是否同网段（redroid 容器直接对 127.0.0.1 即可）"
-  echo "  - 开发者选项里「ADB 调试 / USB 调试」是否打开"
-  echo "  - 若走 USB：直接 adb devices 看序列号，不用 connect"
+if ! printf '%s\n' "$DEVS" | grep -qx "$SERIAL"; then
+  red "连接失败：$SERIAL 不在设备列表里"
   echo "  当前在线设备："; printf '%s\n' "${DEVS:-（无）}" | sed 's/^/    /'
+  echo
+  echo "  按你的连接方式对号入座："
+  echo "  ┌ USB 线连这台电脑"
+  echo "  │   1) 手机：开发者选项 → USB 调试"
+  echo "  │   2) adb devices            # 看到序列号（不是 IP:端口）"
+  echo "  │   3) ADB_SERIAL=<序列号> bash $0 $IP $TOKEN"
+  echo "  ├ Android 11+ 无线调试（端口随机，必须先配对）"
+  echo "  │   1) 手机：开发者选项 → 无线调试 → 使用配对码配对"
+  echo "  │   2) adb pair <IP>:<配对端口>     # 输入手机上那 6 位码"
+  echo "  │   3) ADB_PORT=<调试端口> bash $0 $IP $TOKEN"
+  echo "  └ Android 10 及以下（固定 5555）"
+  echo "      1) USB 连一次：adb tcpip 5555"
+  echo "      2) 拔线：bash $0 $IP $TOKEN"
+  echo
+  echo "  另外确认：手机与执行机同网段；手机连的是 Wi-Fi 不是仅 USB 网络共享。"
   exit 1
 fi
-grn "已连接"
+grn "已连接: $SERIAL"
 
-SHELL_GET() { "$ADB" -s "$IP:$ADB_PORT" shell "$@" 2>/dev/null | tr -d '\r'; }
+SHELL_GET() { "$ADB" -s "$SERIAL" shell "$@" 2>/dev/null | tr -d '\r'; }
+
+# USB 模式没给 IP：从设备 wlan0 读一个，健康检查要用它
+if [ -z "$IP" ]; then
+  IP="$(SHELL_GET ip addr show wlan0 2>/dev/null | grep 'inet ' | head -1 | awk '{print $2}' | cut -d/ -f1)"
+  if [ -z "$IP" ]; then
+    IP="$(SHELL_GET ip route 2>/dev/null | grep -oE 'src [0-9.]+' | head -1 | awk '{print $2}')"
+  fi
+  if [ -n "$IP" ]; then
+    ylw "  未指定 IP，已从设备读到: $IP"
+  else
+    ylw "  未指定 IP 且读不到（可能只连了 USB 网络共享）。请显式传 IP 参数。"
+  fi
+fi
 SDK="$(SHELL_GET getprop ro.build.version.sdk)"
 REL="$(SHELL_GET getprop ro.build.version.release)"
 ABI="$(SHELL_GET getprop ro.product.cpu.abi)"
@@ -88,7 +123,7 @@ if [ ! -f "$APK" ]; then
   echo "  拷贝：cp app/build/outputs/apk/debug/app-debug.apk \"$ROOT/dist/novatv-host.apk\""
   exit 1
 fi
-"$ADB" -s "$IP:$ADB_PORT" install -r "$APK" 2>&1 | sed 's/^/  /'
+"$ADB" -s "$SERIAL" install -r "$APK" 2>&1 | sed 's/^/  /'
 
 # ---------------------------------------------------------------- 3 启动
 step "3/5 启动侧车服务"
@@ -98,21 +133,23 @@ else
   CMD="am startservice"
 fi
 echo "  命令: $CMD （SDK=${SDK:-?}；API 26 才支持 start-foreground-service）"
-"$ADB" -s "$IP:$ADB_PORT" shell $CMD -n "$SVC" --es token "$TOKEN" --ez lan true 2>&1 | sed 's/^/  /'
+"$ADB" -s "$SERIAL" shell $CMD -n "$SVC" --es token "$TOKEN" --ez lan true 2>&1 | sed 's/^/  /'
 
 # ---------------------------------------------------------------- 4 验证
 step "4/5 等待服务并验证"
 HE=""
 for i in 1 2 3 4 5 6 7 8 9 10; do
   sleep 1
-  HE="$(curl -s -m 4 "http://$IP:$PORT/health?token=$TOKEN" 2>/dev/null)"
+  # --noproxy '*' 必须加：执行机若设了 HTTP_PROXY（Clash/v2ray 很常见），
+  # curl 会把局域网 IP 也丢给代理，结果永远是"无响应"——而服务其实是好的。
+  HE="$(curl -s -m 4 --noproxy '*' "http://$IP:$PORT/health?token=$TOKEN" 2>/dev/null)"
   [ -n "$HE" ] && break
 done
 
 if [ -z "$HE" ]; then
   red "  /health 无响应（10 秒）"
   echo "  看服务日志："
-  "$ADB" -s "$IP:$ADB_PORT" logcat -d -s NovaTVHost 2>/dev/null | tail -20 | sed 's/^/    /'
+  "$ADB" -s "$SERIAL" logcat -d -s NovaTVHost 2>/dev/null | tail -20 | sed 's/^/    /'
   echo "  常见原因：服务被系统冻结 / 不是 lan=true / 端口被占 / 设备非 Android"
   exit 1
 fi
