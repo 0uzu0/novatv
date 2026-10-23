@@ -22,5 +22,16 @@ sidecar/android/host-apk/.gradle/
 sidecar/android/host-apk/build/
 sidecar/android/host-apk/local.properties
 
+# 开源 spider 构建中间产物
+# refs 是 CatVodSpider 的 git clone（脚本 ensureRepo 会自己拉），src/classes 是导出与编译结果，
+# stubs 是编译期桩的 .class。只有 stubs-src 是手写的，要入库。
+tools/openspider/refs/
+tools/openspider/src/
+tools/openspider/classes/
+tools/openspider/stubs/
+
+# 开源 spider 的第三方依赖 jar：由 scripts/oss-spider.mjs 按需下载（okhttp/jsoup/zxing/nanohttpd…）
+sidecar/jvm/libs/*.jar
+
 # 本地构建的 APK（CI 会重新出包）
 dist/*.apk

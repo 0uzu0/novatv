@@ -215,7 +215,7 @@ proxy / proxyInvoke
 
 ---
 
-## 五、结论排序
+## 五、结论排序（原始判断，已被第六节部分修正）
 
 | 事 | 价值 | 成本 |
 |---|---|---|
@@ -223,4 +223,87 @@ proxy / proxyInvoke
 | 逐个站点验证 CMS 采集接口（dm84 已关、libvio 404，属个案） | 低（实测多数已关） | 每站几分钟 |
 | 给 NovaTV 加 Python 爬虫运行时（照 FongMi 的 `base.spider` 契约） | 中（要自己写站点） | 天级 |
 | 让 FreeBox 或 CatVodSpider-PC 跑加固包 | **零**（代码层面就不支持） | — |
-| 在 JVM 上跑现成 `.class` 站点爬虫 | **零**（没有公开成品） | — |
+| 用 CatVodSpider 的历史快照编译同名站点，在 JVM 侧车上跑 | **中**（实测 7 编 3 跑） | 已落地，见下节 |
+
+---
+
+## 六、落地结果：开源同名实现替换加固源（2026-10）
+
+上一节写「在 JVM 上跑现成 `.class` 站点爬虫价值为零」，是因为当时只想到「找现成 jar」。
+真正的可行路径是**用源码自己编**：FongMi/CatVodSpider 的历史快照里有 44 个站点的完整
+Java 源码，配置里的 `csp_XxxGuard` 只要类名能对上，就能编出一个纯 JVM 可跑的版本。
+
+### 为什么必须用历史快照
+
+仓库现在已经被清空（只剩 README 与空模板），源码要回到 `91cb48b`（2024-01）才拿得到：
+
+```bash
+git -C tools/openspider/refs/CatVodSpider archive 91cb48b -- app/src/main/java
+```
+
+`scripts/oss-spider.mjs` 已经把这步自动化了（`ensureRepo()` 会自己 clone + unshallow）。
+
+### 实测数字
+
+| 环节 | 数字 |
+|---|---|
+| 开源站点（快照内） | 44 |
+| 配置里 `csp_*Guard` | 37 |
+| 类名能对上（可替换） | **7**：Bili、Dm84、FirstAid、Kanqiu、Push、Wogg、XPath |
+| 编得过 | **7**（补 zxing / nanohttpd / JsoupXpath + sardine、BuildConfig 桩之后） |
+| 冒烟跑得起来 | **3**：Dm84、Kanqiu、FirstAid |
+
+### 剩下 4 个为什么不行（实测，非推测）
+
+| 站点 | 卡点 |
+|---|---|
+| Bili | `homeContent` 里直接 `new FrameLayout.LayoutParams(...)` 建登录二维码弹窗，纯 UI 代码 |
+| Push | `NoClassDefFoundError: android/view/ViewGroup$LayoutParams`，同一条登录/配置弹窗链 |
+| Wogg | 同上（玩偶的配置弹窗） |
+| XPath | 规则来自 `ext`，而配置里这条源 `ext` 为空，`Rule` 没初始化 → NPE |
+
+所以判定标准只能是**跑一次 `home` 看返回**，不能靠「编译通过」。
+
+### 工程上的三个坑（都已修在脚本里）
+
+1. **`-sourcepath` 会把依赖链全编一遍**。`Proxy.java` 引用 `WebDAV.java` 引用
+   `sardine-android`（jitpack 坐标，Maven Central 没有），于是 Bili/Wogg/Push 一起挂。
+   解法：`tools/openspider/stubs-src` 里放编译期桩（Sardine / DavResource / OkHttpSardine），
+   只进编译 classpath，不进 jar。
+2. **侧车的 `Spider` 基类不能挂到编译 classpath**。它会盖掉源码树自带的 `Spider`
+   （签名不同：有没有 `throws Exception`），导致 7 个站点全员编译失败。
+   桩只补 `BuildConfig` 这种独立小类。
+3. **jar 不能原地覆盖**。侧车 `URLClassLoader` 打开后 Windows 不释放句柄，改一次就要停一次服务。
+   解法：jar 名字带内容指纹 `oss-spiders-<hash>.jar`，新包是新路径，旧包继续被跑着的侧车用着。
+
+### 替换是怎么生效的
+
+`server/config/oss-spiders.js` 读 `sidecar/jvm/build/oss-spiders.json`，**只认 `verified` 列表**：
+
+```
+csp_Dm84Guard  →  oss-spiders-113d7cac.jar#com.github.catvod.spider.Dm84
+                  （runtime 改成 jar-spider，spiderJar 指向真实路径）
+```
+
+没通过冒烟的一律不替换，配置里那些源仍显示「需要 Android」——**不假装能播**。
+
+### 现在的实际收益
+
+| 源 | 之前 | 现在 |
+|---|---|---|
+| Dm84 | `supported:false`（要 Android） | 服务端可跑，分类/详情/播放全通 |
+| 看球（Kanqiu） | 同上 | 服务端可跑（直播为主） |
+| Aid（FirstAid） | 同上 | 服务端可跑，**直链 mp4**，浏览器直接放 |
+
+Dm84 的播放地址是 `hhjx.hhplayer.com/?url=...` 这类**解析型**地址，配置里 `parses` 为空，
+所以到「取直链」这步会提示需要解析接口——这是另一件事，与 spider 替换无关。
+FirstAid 返回的是 `vod.youlai.cn/.../*.mp4` 直链，`/api/proxy` 实测 206 + `ftypisom`，
+是当前唯一「加固源 → 浏览器直接能看」的完整闭环。
+
+### 怎么重跑
+
+```bash
+node scripts/oss-spider.mjs --list      # 看快照里有哪些站点、配置能对上哪些
+node scripts/oss-spider.mjs --verify    # 编译 + 打包 + 对着 :8899 冒烟，写 manifest
+# 主服务重启后自动生效；核对：GET /api/sources 看 api 是否变成 oss-spiders-xxx.jar#...
+```

@@ -4,9 +4,10 @@ import crypto from 'node:crypto';
 import { http } from '../util/http.js';
 import { parseJsonc, stripJsonc } from '../util/jsonc.js';
 import { listZipEntries, classifySpider } from '../util/zipinfo.js';
+import { ossFor } from './oss-spiders.js';
 
 const CACHE_FILE = path.join(process.cwd(), 'data', 'config-cache.json');
-const SNAPSHOT_SCHEMA = 3; // 归类/支持集逻辑变化时 +1，自动失效旧快照
+const SNAPSHOT_SCHEMA = 4; // 归类/支持集逻辑变化时 +1，自动失效旧快照（4: 接入开源替代映射）
 
 /**
  * 饭太硬这类"藏图接口"的通用解码器。
@@ -154,7 +155,19 @@ export class ConfigStore {
     }
     const sites = merged.map((s) => {
       const cls = classifySite(s);
-      return { ...s, runtime: cls.runtime, runtimeReason: cls.reason, supported: SUPPORTED.has(cls.runtime) };
+      // 加固源若有开源同名实现（oss-spiders.jar），改走 JVM 侧车 —— 这是纯增益：
+      // 原路径必须 Android，替换后纯服务端可跑。详见 server/config/oss-spiders.js
+      const oss = cls.runtime === 'jar-spider' ? ossFor(s.api) : null;
+      const runtime = oss ? 'jar-spider' : cls.runtime;
+      return {
+        ...s,
+        ...(oss ? { api: oss.api, spiderJar: oss.spiderJar, ossCls: oss.cls } : {}),
+        runtime,
+        runtimeReason: oss
+          ? `开源实现（${oss.cls}，FongMi/CatVodSpider），由 JVM 侧车执行`
+          : cls.reason,
+        supported: SUPPORTED.has(runtime),
+      };
     });
     const snapshot = {
       schema: SNAPSHOT_SCHEMA,

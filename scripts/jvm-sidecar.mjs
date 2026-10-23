@@ -18,6 +18,20 @@ const BUILD = path.join(ROOT, 'sidecar', 'jvm', 'build');
 const CLASSES = path.join(BUILD, 'classes');
 const DEMO_CLASSES = path.join(BUILD, 'demo-classes');
 const JAR = path.join(BUILD, 'demo-spider.jar');
+const LIBS = path.join(ROOT, 'sidecar', 'jvm', 'libs');
+
+/**
+ * sidecar/jvm/libs/*.jar 会一起进 classpath。
+ * 第三方开源 spider（okhttp/jsoup/org.json 等依赖）编译出的 jar 靠这里补齐运行时。
+ * 生成方式：node scripts/oss-spider.mjs
+ */
+function libJars() {
+  if (!fs.existsSync(LIBS)) return [];
+  return fs
+    .readdirSync(LIBS)
+    .filter((f) => f.endsWith('.jar'))
+    .map((f) => path.join(LIBS, f));
+}
 
 function walk(dir, ext) {
   const out = [];
@@ -72,8 +86,10 @@ console.log(`✓ ${path.relative(ROOT, JAR)} (${(fs.statSync(JAR).size / 1024).t
 if (process.argv.includes('--build')) process.exit(0);
 
 const port = process.env.JVM_SIDECAR_PORT || '8899';
+const CP = [CLASSES, ...libJars()].join(path.delimiter);
 console.log(`→ 启动侧车 http://127.0.0.1:${port}`);
-const child = spawnSync('java', ['-cp', CLASSES, 'novatv.Sidecar'], {
+if (libJars().length) console.log(`  额外依赖 ${libJars().length} 个 jar（sidecar/jvm/libs）`);
+const child = spawnSync('java', ['-cp', CP, 'novatv.Sidecar'], {
   stdio: 'inherit',
   env: { ...process.env, JVM_SIDECAR_PORT: port, NOVA_SPIDER_JAR: JAR },
 });

@@ -167,8 +167,13 @@ POST /spider
 - **46 个 jar 源**：加固包（dex 仅 36.9 KB，真逻辑在 1.33 MB 的 guard 里），JVM/Node 都拿不到字节码，
   只能交给 Android 侧车。未接设备前它们在 `/api/sources` 里是 `supported:false`，搜索会被跳过并给出原因。
   完整取舍见 [docs/RUNTIME.md](docs/RUNTIME.md)。
+- **其中 3 个已经不用 Android 了**：`node scripts/oss-spider.mjs --verify` 会把 CatVodSpider
+  历史快照里的同名开源实现编成 `oss-spiders-<hash>.jar`，冒烟通过后主服务自动替换
+  `csp_XxxGuard`（目前是 Dm84 / 看球 / Aid）。编得过但跑不起来的不替换——**不假装能播**。
+  过程与三个坑见 [docs/REFERENCE-PROJECTS.md](docs/REFERENCE-PROJECTS.md) 第六节。
 - 本机网络下 `tx.hls.huya.com` 的 m3u8 直连返回 403（token 与 IP 绑定），播放链路止于"取址 + 代理改写"。
 - `parses`（WebView 解析接口）、`rules`（m3u8 广告清洗）、弹幕未实现，留了扩展位。
+  Dm84 这类返回 `hhplayer.com/?url=...` 的源就卡在这一步（配置里 `parses` 为空）。
 - 收藏/续播存 localStorage；要云端同步，替换 `web/js/app.js` 里的 `favAll/toggleFav` 与 `player.js` 的 `writeHistory` 即可。
 - 本项目仅用于协议与界面技术演示，不存储、不提供任何片源。
 
