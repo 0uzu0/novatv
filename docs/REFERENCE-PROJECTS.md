@@ -307,3 +307,71 @@ node scripts/oss-spider.mjs --list      # 看快照里有哪些站点、配置�
 node scripts/oss-spider.mjs --verify    # 编译 + 打包 + 对着 :8899 冒烟，写 manifest
 # 主服务重启后自动生效；核对：GET /api/sources 看 api 是否变成 oss-spiders-xxx.jar#...
 ```
+
+---
+
+## 七、FongMi/TV 本体（非 CatVodSpider，2026-10 补看）
+
+之前只看了它的 `CatVodSpider`（站点集合，现已清空），没看主仓库本身。
+实际查：默认分支是 **`fongmi`**（不是 main，raw 取 main 会 404），约 135 MB，10k stars。
+
+```
+catvod/     ← 纯 Java 模块，可直接移植到 JVM（这是最有价值的部分）
+app/        ← Android 外壳（Activity、播放器、UI）
+quickjs/    ← JS spider 运行时（在 Android 上跑 js 源）
+nodejs/     ← Node 运行时（同上）
+thunder/ tvbus/  ← 特殊协议
+```
+
+### 7.1 它的 Spider 基类长什么样（`catvod/crawler/Spider.java`）
+
+```java
+public abstract class Spider {
+    public String siteKey;
+    public Net net;
+    public Local local;
+
+    public String getProxyUrl(Map<String, String> params) {
+        Uri.Builder url = Uri.parse(Proxy.getUrl(true)).buildUpon()
+                .appendQueryParameter("do", "jar")
+                .appendQueryParameter("siteKey", siteKey);
+        for (Map.Entry<String, String> e : params.entrySet()) {
+            if (e.getKey().equals("do") || e.getKey().equals("siteKey"))
+                throw new IllegalArgumentException("Reserved proxy parameter");
+            url.appendQueryParameter(e.getKey(), e.getValue());
+        }
+        return url.build().toString();
+    }
+
+    public Object[] proxy(Map<String, String> params) throws Exception { return null; }
+    public String action(String action) throws Exception { return null; }
+    public void destroy() { }
+}
+```
+
+`Proxy.getUrl(true)` 就是 `http://127.0.0.1:<port>/proxy`。
+所以一个 spider 如果不想自己暴露真实地址，就在 `playerContent` 里返回
+`getProxyUrl(...)`，客户端再去回打 `/proxy?do=jar&siteKey=xxx&...`。
+
+### 7.2 这条暴露了我们侧车的真实缺口
+
+我们的 JVM/Android 侧车只有 `/spider` 和 `/health`，**没有 `/proxy` 这条 context**。
+于是：
+
+- 返回直链的源（Aid）→ 正常，已验证
+- 返回 `getProxyUrl(...)` 的源 → 地址指向 `127.0.0.1:8899/proxy?...`，浏览器打不开；
+  容器部署时主服务还会把这个 127.0.0.1 当成自己，必然连不上
+
+补法很直接：侧车加一条 context，按 `siteKey` 找到已初始化的实例，反射调 `proxy(params)`，
+把返回的 `Object[]` 按 TVBox 约定输出 —— `[int code, String contentType, (Map headers,) InputStream|byte[] body]`，
+`code == 302` 时读 headers 里的 `Location` 直接重定向。已记在 README「已知边界」。
+
+### 7.3 另外两个可以抄但还没抄的
+
+| 模块 | 它怎么做的 | 我们的现状 |
+|---|---|---|
+| `quickjs/` | 内置 QuickJS，js 源直接跑 | JS 源跑在 Node 的 `vm` 里，同步 HTTP 靠 `child_process` 调 `curl`（镜像里必须装 curl 就是这个原因） |
+| `net/` | `Net.java` 45 KB，含 DNS 优选、代理选择、重定向拦截、缓存 | 我们用 undici + 手写 m3u8 改写，功能够但没 DNS 优选 |
+
+真要提升 JS 源的兼容面，抄 `quickjs/` 比继续在 `curl` 上打补丁更划算；
+但那是一次不小的重构，当前 3 个 js 源已经能跑，不急。

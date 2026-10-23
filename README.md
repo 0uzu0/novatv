@@ -178,6 +178,11 @@ POST /spider
   `csp_XxxGuard`（目前是 Dm84 / 看球 / Aid）。编得过但跑不起来的不替换——**不假装能播**。
   过程与三个坑见 [docs/REFERENCE-PROJECTS.md](docs/REFERENCE-PROJECTS.md) 第六节。
 - 本机网络下 `tx.hls.huya.com` 的 m3u8 直连返回 403（token 与 IP 绑定），播放链路止于"取址 + 代理改写"。
+- **spider 的 `/proxy?do=jar&siteKey=` 端点还没实现**。TVBox 的 `Spider.getProxyUrl()` 生成的就是这个地址
+  （见 [docs/REFERENCE-PROJECTS.md](docs/REFERENCE-PROJECTS.md) 第七节），侧车目前只有 `/spider` 与 `/health`。
+  影响面：`playerContent` 不返回直链、而是让客户端回打引 `/proxy` 的那些源，取到的地址在浏览器里打不开；
+  返回直链的源不受影响（Aid 就是这样跑通的）。补法是侧车加一条 context，把 `proxy(Map)` 的
+  `Object[]`（`[code, contentType, (headers), body]`）原样转发出去。
 - `parses`（WebView 解析接口）、`rules`（m3u8 广告清洗）、弹幕未实现，留了扩展位。
   Dm84 这类返回 `hhplayer.com/?url=...` 的源就卡在这一步（配置里 `parses` 为空）。
 - 收藏/续播存 localStorage；要云端同步，替换 `web/js/app.js` 里的 `favAll/toggleFav` 与 `player.js` 的 `writeHistory` 即可。
