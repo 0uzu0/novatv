@@ -1,0 +1,64 @@
+# ============================================================================
+# NovaTV · redroid 侧车（斐讯 N1 / Armbian ARM64 专用）
+#
+# 为什么单独一份：N1 只有 2GB 内存，通用版限了 3G，在 N1 上必然 OOM。
+#   本文件按 N1 实况调参：720p 渲染、1.2G 上限、Android 11（比 13 省内存）。
+#
+# 与通用版的差别：
+#   - 分辨率 1080x1920 → 720x1280（省 ~200MB 图形内存）
+#   - 内存上限 3G → 1200M
+#   - 镜像 13.0.0_arm64 → 11.0.0_arm64（ART 冷启动更快、占用更低）
+#
+# 前置（必须先跑，别跳过）：
+#   sudo bash sidecar/android/preflight.sh
+#   → 结论若报「binder 不可用」，本文件不要执行，走 N1-ARMBIAN.md 的其它路线
+#
+# 启动前（每次重启宿主都要做）：
+#   sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+#   sudo mkdir -p /dev/binderfs
+#   sudo mount -t binder binder /dev/binderfs
+#   然后把下面 /dev/binderfs 那行挂载注释打开
+#
+#   N1 的 Armbian 若 kernel < 5.4，还需要 ashmem：
+#     sudo modprobe ashmem_linux
+# ============================================================================
+
+services:
+  redroid:
+    # N1 = Amlogic S905D = Cortex-A53 = aarch64，与加固包 ftyguard_v8.so 同架构
+    image: redroid/redroid:11.0.0_arm64
+    platform: linux/arm64
+    container_name: novatv-redroid-n1
+    restart: unless-stopped
+    privileged: true
+
+    ports:
+      - "5555:5555"
+
+    volumes:
+      - ./data-n1:/data
+      # preflight 确认 binderfs 挂载成功后，打开下面这行
+      # - /dev/binderfs:/dev/binderfs
+
+    environment:
+      TZ: Asia/Shanghai
+
+    command:
+      # N1 无 GPU，必须 guest 软渲染；分辨率压低换内存
+      - androidboot.redroid_width=720
+      - androidboot.redroid_height=1280
+      - androidboot.redroid_dpi=320
+      - androidboot.redroid_gpu_mode=guest
+      - androidboot.redroid_adbd=1
+
+    # 2GB 总内存，Armbian 自身约 300~400MB，留给 redroid 1.2G 是安全边界
+    deploy:
+      resources:
+        limits:
+          memory: 1200M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"

@@ -42,6 +42,19 @@ Host APK（手机 / TV 盒子 / redroid 里的 ART）
 | **B. 真机 + adb** | 手机和 NAS 不同网段，或只想临时跑 | 必须连着电脑/NAS 的 adb |
 | **C. redroid 容器** | 不想用手机，NAS 是 ARM 或愿意折腾转译 | x86 NAS 上 arm .so 需要转译，成功率不稳 |
 
+> **已经买好 / 正在用斐讯 N1？** 单独看 [`N1-ARMBIAN.md`](N1-ARMBIAN.md)：
+> N1 是 aarch64，与包内 `ftyguard_v8.so` 同架构，**可能不用刷机**就能在 Armbian 上开 redroid。
+> 那份文档先让你 30 秒判断「Armbian 装在 U 盘还是 eMMC」，再按 binder 预检结果分三条路线走。
+>
+> 设备准备好之后，安装与启动统一用一键脚本：
+>
+> ```bash
+> bash n1-setup.sh <设备IP> <token>     # 自动选 am startservice / start-foreground-service
+> ```
+>
+> N1 专用编排（720p / 1.2G 上限，通用版 3G 在 2GB 内存的 N1 上必然 OOM）：
+> `docker-compose.redroid-n1.yml`
+
 ### 形态 A：手机直连（不用电脑，推荐）
 
 ```bash
