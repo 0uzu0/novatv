@@ -393,16 +393,39 @@ async function handleProxy(req, res, url) {
 
     // 大文件 / 直播流：流式透传，避免整包 buffer 卡死
     const headers = { ...baseHeaders, 'Content-Type': ct, 'Cache-Control': 'public, max-age=300' };
-    for (const h of ['content-length', 'content-range', 'accept-ranges']) {
+
+    // curl 回退（fetchx 直连失败时走这条，国内是常态）：整包已经在内存里，没有 body 流。
+    // 此时绝不能透传上游的 Content-Length，否则声明 950KB 却只发 0 字节，
+    // 浏览器/播放器会一直等（curl 报 end of response with N bytes missing）。
+    if (!up.body) {
+      const buf = Buffer.from(await up.arrayBuffer());
+      headers['Content-Length'] = String(buf.length);
+      res.writeHead(up.status, headers);
+      return res.end(buf);
+    }
+
+    // fetch 路径：只透传 range 相关头。Content-Length 仅在未被压缩时透传——
+    // undici 会透明解压，压缩流的长度与解压后不符，透传同样会截断。
+    for (const h of ['content-range', 'accept-ranges']) {
       const v = up.headers.get(h);
       if (v) headers[h.replace(/(^|-)([a-z])/g, (m, a, b) => a + b.toUpperCase())] = v;
     }
+    const enc = up.headers.get('content-encoding');
+    if (!enc || enc === 'identity') {
+      const cl = up.headers.get('content-length');
+      if (cl) headers['Content-Length'] = cl;
+    }
     res.writeHead(up.status, headers);
-    if (!up.body) return res.end();
     const { Readable } = await import('node:stream');
     const nodeStream = Readable.fromWeb(up.body);
-    nodeStream.on('error', () => res.destroy());
-    req.on('close', () => nodeStream.destroy());
+    nodeStream.on('error', () => {
+      if (!res.writableEnded) res.destroy();
+    });
+    // 注意：不能监听 req 的 'close'。Node 16+ 里 GET 请求体一读完就会触发 'close'，
+    // 会把还在传输的响应流当场销毁。只应在客户端真正断开时清理上游流。
+    res.on('close', () => {
+      if (!res.writableEnded) nodeStream.destroy();
+    });
     nodeStream.pipe(res);
   } catch (e) {
     if (!res.headersSent) return json(res, 502, { error: `代理失败: ${e.message}` });
