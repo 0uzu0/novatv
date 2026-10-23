@@ -59,6 +59,16 @@ jobs:
           echo "✓ docker-compose.yml"
           docker compose -f docker-compose.yml -f docker-compose.sidecar.yml config > /dev/null
           echo "✓ 叠加 sidecar"
+          # NAS 用的两份：本地构建 / 纯拉镜像
+          docker compose -f docker-compose.nas.yml --profile jvm --profile android config > /dev/null
+          echo "✓ docker-compose.nas.yml"
+          docker compose -f docker-compose.ghcr.yml --profile jvm --profile android config > /dev/null
+          echo "✓ docker-compose.ghcr.yml"
+          # 纯拉镜像那份不能有 build 段，否则 NAS 上没有源码时会误触发构建
+          if grep -qE '^[[:space:]]+build:' docker-compose.ghcr.yml; then
+            echo "✘ docker-compose.ghcr.yml 出现 build: 段"; exit 1
+          fi
+          echo "✓ ghcr 编排无 build 段"
 
   build:
     needs: lint

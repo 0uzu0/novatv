@@ -1,0 +1,159 @@
+# ============================================================================
+# NovaTV · 纯镜像部署（不 clone 源码，不在 NAS 上构建）
+#
+# 与 docker-compose.nas.yml 的唯一区别：这里没有 build: 段。
+#
+# 为什么必须分开：服务同时写了 image 和 build 时，compose 的默认拉取策略是
+# 「本地没有就构建」。而 NAS 上如果只放了本文件和 .env、没有 Dockerfile 和
+# 源码目录，up -d 会直接报 context/dockerfile 找不到 —— 明明镜像在 registry
+# 上是好的。这份文件去掉 build 后，up -d 就退化成「缺什么拉什么」。
+#
+# 用法（在放本文件和 .env 的目录里执行）：
+#
+#   docker compose -f docker-compose.ghcr.yml up -d                    # 只主服务
+#   docker compose -f docker-compose.ghcr.yml --profile jvm up -d      # + JVM 侧车
+#   docker compose -f docker-compose.ghcr.yml --profile jvm \
+#                --profile android up -d                               # 全量
+#
+# 镜像来源（公开包，无需 docker login）：
+#   ghcr.io/0uzu0/novatv:latest
+#   ghcr.io/0uzu0/novatv-sidecar:latest
+#   budtmo/docker-android:emulator_11.0          （Docker Hub）
+#
+# 想跟着某个版本走，把 .env 里的 NOVATV_TAG 改成 v1.0.0 / sha-abc1234。
+#
+# 详细的准备、验证、排障见 docs/NAS-DEPLOY.md
+# ============================================================================
+
+name: novatv
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ──────────────────────────────────────────────────────────────────────────
+  # 主服务：搜索聚合 / 详情 / m3u8 改写 / 分片代理 / 缓存 / 网页
+  # ──────────────────────────────────────────────────────────────────────────
+  novatv:
+    image: ghcr.io/${GHCR_OWNER:-0uzu0}/novatv:${NOVATV_TAG:-latest}
+    container_name: novatv
+    restart: unless-stopped
+
+    # 与宿主目录属主对齐，否则 ./data 写不进去（群晖首个用户常是 1026）
+    user: "${PUID:-1000}:${PGID:-1000}"
+
+    ports:
+      - "${NOVATV_PORT:-8890}:8890"
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      PORT: "8890"
+      CONFIG_URL: ${CONFIG_URL:-http://www.饭太硬.cc/tv}
+      CONFIG_URLS: ${CONFIG_URLS:-}
+      SPIDER_JVM_URL: ${SPIDER_JVM_URL:-}
+      SPIDER_ANDROID_URL: ${SPIDER_ANDROID_URL:-}
+      SPIDER_TOKEN: ${SPIDER_TOKEN:-}
+
+    # Android 侧车在 QEMU 的 NAT 后面，宿主路由不到 guest 的网卡，
+    # 只能靠宿主上的 adb forward 把端口捅出来。adb forward 监听宿主 0.0.0.0:8899，
+    # 容器里要用 host.docker.internal 才够得着。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      - ./data:/app/data
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8890/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+
+    logging: *default-logging
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # JVM 侧车（可选）：跑「未加固」的 spider jar
+  # ──────────────────────────────────────────────────────────────────────────
+  novatv-sidecar:
+    profiles: ["jvm"]
+    image: ghcr.io/${GHCR_OWNER:-0uzu0}/novatv-sidecar:${NOVATV_TAG:-latest}
+    container_name: novatv-sidecar
+    restart: unless-stopped
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      JVM_SIDECAR_PORT: "8899"
+      JVM_SIDECAR_HOST: 0.0.0.0
+      NOVA_SPIDER_JAR: /app/jars/demo-spider.jar
+
+    # 换成自己打的 oss-spiders jar 时打开（宿主路径:容器路径:只读）
+    # volumes:
+    #   - ./jars/oss-spiders.jar:/app/jars/demo-spider.jar:ro
+
+    # 只在 compose 内网暴露，不映射到宿主机
+    expose:
+      - "8899"
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8899/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    logging: *default-logging
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Android 侧车（可选）：KVM 虚拟机里的 Android 11，跑加固包
+  # 硬前提：/dev/kvm 存在且容器能访问；没有就改用真机
+  # ──────────────────────────────────────────────────────────────────────────
+  novatv-android:
+    profiles: ["android"]
+    image: budtmo/docker-android:emulator_11.0
+    container_name: novatv-android
+    restart: unless-stopped
+
+    devices:
+      - /dev/kvm:/dev/kvm
+
+    # /dev/kvm 是 root:kvm 660，--device 只会原样搬权限位、不放宽。
+    # 容器里模拟器是非 root 用户，打不开就报 permission denied ——
+    # 这个错极易被误读成「KVM 没开」。
+    #   先查：stat -c '%g' /dev/kvm
+    #   再填：把下面注释打开，数字换成查到的 gid
+    # group_add:
+    #   - "108"
+
+    privileged: true
+
+    ports:
+      # 宿主 15555 → 容器 5555。必须错开：宿主 adb server 默认占 5555，
+      # 写 5555:5555 会让 adb 把本机认成永远 offline 的 emulator-5554。
+      - "15555:5555"
+      # noVNC，浏览器看模拟器画面。不想暴露就注释掉
+      - "6081:6080"
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      EMULATOR_DEVICE: "Samsung Galaxy S10"
+      EMULATOR_NO_SKIN: "true"
+      EMULATOR_ADDITIONAL_ARGS: "-no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot"
+      EMULATOR_DATA_PARTITION: "2048m"
+      WEB_VNC: "true"
+      APPIUM: "false"
+
+    volumes:
+      # 只持久化 AVD 目录。挂整个 /home/androidusr 会盖掉镜像自带的
+      # entrypoint 脚本，容器直接启动失败。
+      - ./data-android:/home/androidusr/.android
+
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+    logging: *default-logging

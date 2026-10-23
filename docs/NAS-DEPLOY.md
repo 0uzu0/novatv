@@ -3,8 +3,15 @@
 > 面向：群晖 / 威联通 / 飞牛 / Unraid / 自建 Linux，x86_64 或 ARM 都适用。
 > 目标：一条命令起服务，浏览器能搜能播；加固源另配 Android 侧车。
 >
-> 本方案对应编排文件：**`docker-compose.nas.yml`**（一体化，用 profile 分规模）。
-> 如果你只要最小可用，`docker-compose.yml` + `docs/DEPLOY.md` 也够，那份更短。
+> 本方案对应两份编排，按「镜像从哪来」二选一：
+>
+> | 编排 | 取镜像方式 | 用在 |
+> |---|---|---|
+> | **`docker-compose.ghcr.yml`** | 直接拉 CI 构建好的镜像 | NAS 不想编译，**推荐** |
+> | `docker-compose.nas.yml` | 本机 `build` | 想改代码 / 自定义镜像 |
+>
+> 两者服务定义完全一致，只差 `build:` 段；用哪份看第四节还是第四·B 节。
+> 若只要最小可用，`docker-compose.yml` + `docs/DEPLOY.md` 也够，那份更短。
 
 ## 〇、三层结构，先看清再动手
 
@@ -78,7 +85,7 @@ bash scripts/nas-deploy.sh --check --all
 ## 二、准备目录
 
 ```bash
-# 私有仓库需要 PAT：Username 填 0uzu0，Password 处粘贴 token
+# 仓库已公开，clone 不需要任何凭据
 git clone https://github.com/0uzu0/novatv.git
 cd novatv
 
@@ -151,11 +158,12 @@ docker compose -f docker-compose.nas.yml --profile jvm --profile android up -d -
 首次构建约 **2~4 分钟**（拉 `node:22-bookworm-slim` + 构建）。Android 侧车会额外拉
 数 GB 的模拟器镜像，网络慢的话第一次要等一会。
 
-或者用脚本，它把自检 → 生成 .env → 构建 → 等就绪串成一步：
+或者用脚本，它把自检 → 生成 .env → 取镜像 → 等就绪串成一步：
 
 ```bash
-bash scripts/nas-deploy.sh --all          # = --nas --jvm --android
-bash scripts/nas-deploy.sh --nas --jvm    # 只要 JVM 侧车
+bash scripts/nas-deploy.sh --all             # 本地构建，全量
+bash scripts/nas-deploy.sh --nas --jvm       # 本地构建，+ JVM 侧车
+bash scripts/nas-deploy.sh --pull --all      # 直接拉镜像，全量（见第四·B 节）
 ```
 
 看进度：
@@ -166,6 +174,72 @@ docker compose -f docker-compose.nas.yml logs -f novatv
 ```
 
 等 `docker compose ps` 里 novatv 变成 `healthy`（约 25~60 秒，首启要拉远端配置并解码）。
+
+---
+
+## 四·B、纯镜像部署（不在 NAS 上构建）
+
+第四节是「本机构建」。如果不愿意让 NAS 花几分钟编译，直接用 CI 构建好的镜像即可 ——
+但有一个前置条件几乎所有人都会踩。
+
+### 4B.1 前提：把 GHCR 的两个包改成 public
+
+**仓库公开 ≠ 包公开**，这是两个独立开关。仓库转公开后包默认仍是私有，此时 `docker pull`
+报 `unauthorized` / `denied`，而错误信息里不会提示你「该去改可见性」。
+
+打开这两个链接，各自右侧 **Package settings** → 滚到底 **Danger Zone** →
+**Change visibility** → 选 **Public** → 按提示输入包名确认：
+
+- <https://github.com/users/0uzu0/packages/container/novatv/settings>
+- <https://github.com/users/0uzu0/packages/container/novatv-sidecar/settings>
+
+改完在任意能上网的机器上验一下（要 200，不是 401）：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://ghcr.io/v2/0uzu0/novatv/tags/list
+```
+
+### 4B.2 启动
+
+```bash
+bash scripts/nas-deploy.sh --pull          # 只主服务
+bash scripts/nas-deploy.sh --pull --jvm    # + JVM 侧车
+bash scripts/nas-deploy.sh --pull --all    # 全量（再 + Android 侧车）
+```
+
+不用脚本的等价写法：
+
+```bash
+docker compose -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+拉取耗时取决于带宽（两个镜像合计约 200 MB），比构建快得多，也不占 NAS 的 CPU。
+
+### 4B.3 为什么拉取必须换一份编排
+
+`docker-compose.nas.yml` 里每个服务同时写了 `image` 和 `build`。Compose 的默认策略是
+**「本地没有镜像就构建」**，所以在 NAS 上没有 `Dockerfile`、`server/` 时会直接报错；
+而这个报错看起来像「镜像不存在」，很容易往错误方向排查半天。
+
+`docker-compose.ghcr.yml` 去掉了 `build:` 段，`up -d` 就退化成「缺什么拉什么」。
+两份文件除此之外内容一致，**选定一份就别混用**（服务名与 `container_name` 相同，会冲突）。
+
+### 4B.4 如果不想公开包
+
+保持私有也可以，代价是 NAS 上登录一次：
+
+```bash
+# classic PAT，勾 read:packages
+echo "<你的PAT>" | docker login ghcr.io -u 0uzu0 --password-stdin
+```
+
+群晖 Container Manager 没有登录入口，必须 SSH 进 NAS 执行；威联通可在
+Container Station 的「注册表」里添加 `ghcr.io` 并填账号 + PAT。
+
+> 注意：用 `gho_` 开头的 OAuth token（GitHub CLI 那类）换 registry token 会失败，
+> 报 `permission_denied: The token provided does not match expected scopes`。
+> 必须用勾了 `read:packages` 的 classic PAT（`ghp_` 开头）。
 
 ---
 

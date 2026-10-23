@@ -96,7 +96,7 @@ for (const df of DOCKERFILES) {
 }
 
 console.log('\n[2] 关键文件');
-for (const f of ['docker-compose.yml', 'docker-compose.sidecar.yml', 'docker-compose.nas.yml', '.env.example', 'package.json', 'web/index.html']) {
+for (const f of ['docker-compose.yml', 'docker-compose.sidecar.yml', 'docker-compose.nas.yml', 'docker-compose.ghcr.yml', '.env.example', 'package.json', 'web/index.html']) {
   fs.existsSync(path.join(ROOT, f)) ? ok(f) : bad(`缺少 ${f}`);
 }
 
@@ -148,7 +148,7 @@ for (const ref of bases) {
 }
 
 console.log('\n[5] compose 镜像名');
-for (const f of ['docker-compose.yml', 'docker-compose.sidecar.yml', 'docker-compose.nas.yml']) {
+for (const f of ['docker-compose.yml', 'docker-compose.sidecar.yml', 'docker-compose.nas.yml', 'docker-compose.ghcr.yml']) {
   const text = fs.readFileSync(path.join(ROOT, f), 'utf8');
   for (const m of text.matchAll(/^\s*image:\s*(\S+)/gm)) {
     const img = m[1];

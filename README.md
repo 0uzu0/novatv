@@ -57,48 +57,64 @@ npm run docker:preflight   # 没装 docker 也能查：COPY 源、CRLF、镜像�
 
 ## Docker / NAS 部署
 
-仓库：**https://github.com/0uzu0/novatv**（私有）。镜像由 GitHub Actions 自动构建，
+仓库：**https://github.com/0uzu0/novatv**（公开）。镜像由 GitHub Actions 自动构建，
 双架构（amd64 / arm64），推就出品：
 
 ```
 push → lint → build（2 镜像 × 2 架构 → GHCR）→ smoke（真跑容器验健康检查）
 ```
 
-NAS 上两条路，任选一条：
+### 最快：拉现成镜像，NAS 上不构建
 
 ```bash
-# A. 本地构建（推荐，私有仓库不用折腾 GHCR 登录）
 git clone https://github.com/0uzu0/novatv.git && cd novatv
-cp .env.example .env && vi .env       # 只需改 PUID/PGID
-docker compose up -d --build          # http://<NAS-IP>:8890
-
-# B. 拉 CI 构建好的镜像（先把 Package 改成 public，或 NAS 上 docker login ghcr.io）
-cp .env.example .env && vi .env
-docker compose pull && docker compose up -d
+cp .env.example .env && vi .env        # 只需改 PUID/PGID（用侧车再加 SPIDER_TOKEN）
+bash scripts/nas-deploy.sh --pull      # 拉镜像 → 起容器 → 等健康检查 → 打印地址
+# 打开 http://<NAS-IP>:8890
 ```
 
-需要 JVM 侧车时叠加一层（会自动把主服务的 `SPIDER_JVM_URL` 指过去）：
+> **前置条件**：GHCR 上 `novatv` 与 `novatv-sidecar` 两个包必须是 **public**。
+> 仓库公开 ≠ 包公开，包的可见性是独立开关 —— 改法与验证命令见
+> [docs/NAS-DEPLOY.md](docs/NAS-DEPLOY.md) 的「四·B 纯镜像部署」一节。
+
+不用脚本的话，等价两条：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.sidecar.yml up -d --build
+docker compose -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.ghcr.yml up -d
 ```
+
+`docker-compose.ghcr.yml` 与 `docker-compose.nas.yml` 的唯一区别是**没有 `build:` 段**。
+有 build 段时 compose 的默认策略是「本地没有就构建」，NAS 上没有源码就会报
+找不到 Dockerfile —— 镜像明明是好的。这就是为什么拉取要用单独一份编排。
 
 ### 想一次配齐三个服务（主服务 + 两侧车）
 
-用一体化编排，`profile` 控制规模，**不用改文件**：
+`profile` 控制规模，**不用改文件**：
 
 ```bash
-cp .env.example .env && vi .env    # 改 PUID/PGID、设 SPIDER_TOKEN
+bash scripts/nas-deploy.sh --pull --jvm    # 主服务 + JVM 侧车（未加固 jar 源）
+bash scripts/nas-deploy.sh --pull --all    # 再加 Android 侧车（加固源，需 /dev/kvm）
+```
 
-docker compose -f docker-compose.nas.yml up -d --build                            # 只要主服务
-docker compose -f docker-compose.nas.yml --profile jvm up -d --build              # + JVM 侧车
-docker compose -f docker-compose.nas.yml --profile jvm --profile android up -d --build  # + Android 侧车
+等价 compose 写法：
+
+```bash
+docker compose -f docker-compose.ghcr.yml up -d                                    # 只要主服务
+docker compose -f docker-compose.ghcr.yml --profile jvm up -d                      # + JVM 侧车
+docker compose -f docker-compose.ghcr.yml --profile jvm --profile android up -d    # 全量
+```
+
+### 或者本机构建
+
+```bash
+bash scripts/nas-deploy.sh --all        # 需要整个仓库 + 能拉 node:22-bookworm-slim
 ```
 
 完整方案（前置判定、五层验证、Android 侧车接入、开机自启、排障表）见
 **[docs/NAS-DEPLOY.md](docs/NAS-DEPLOY.md)**。
 
-最小部署的完整步骤、PAT 获取、群晖/威联通图形入口、把开源 spider 产物搬上 NAS、
+最小部署的完整步骤、群晖/威联通图形入口、把开源 spider 产物搬上 NAS、
 升级回滚与排障见 **[docs/DEPLOY.md](docs/DEPLOY.md)**。
 
 ## 目录结构

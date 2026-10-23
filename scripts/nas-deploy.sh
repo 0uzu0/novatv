@@ -1,26 +1,27 @@
 #!/usr/bin/env bash
 # ============================================================================
-# NovaTV —— NAS 一键部署（本地构建路线）
+# NovaTV —— NAS 一键部署
 #
-# 用法（在仓库根目录）：
-#   bash scripts/nas-deploy.sh                 # 最小部署：只起主服务
-#   bash scripts/nas-deploy.sh --nas           # 改用一体化编排 docker-compose.nas.yml
-#   bash scripts/nas-deploy.sh --nas --jvm     # 一体化 + JVM 侧车
-#   bash scripts/nas-deploy.sh --all           # 全量 = --nas --jvm --android
+# 两种取镜像方式，其余步骤完全一样：
+#   --pull   直接拉 GHCR 上构建好的镜像（不需要源码、不花 CPU 构建）
+#   （默认） 在本机构建镜像（要整个仓库 + 能拉 node 基础镜像）
+#
+# 用法（在仓库根目录，或把本文件与 compose 放同一目录）：
+#   bash scripts/nas-deploy.sh --pull --all    # 拉镜像，全量（主服务+JVM+Android）
+#   bash scripts/nas-deploy.sh --pull          # 拉镜像，只起主服务
+#   bash scripts/nas-deploy.sh --pull --jvm    # 拉镜像 + JVM 侧车
+#   bash scripts/nas-deploy.sh --all           # 本地构建，全量
 #   bash scripts/nas-deploy.sh --check         # 只做环境自检，不动容器
-#   bash scripts/nas-deploy.sh --upgrade       # git pull 后重建
+#   bash scripts/nas-deploy.sh --upgrade --pull # 重新拉最新镜像并重启
 #
-# 参数可组合，顺序无关。也可用环境变量覆盖（Linux/NAS 上更顺手）：
-#   COMPOSE_FILE=docker-compose.nas.yml COMPOSE_PROFILES=jvm,android bash scripts/nas-deploy.sh
+# 参数可组合，顺序无关。也可用环境变量覆盖：
+#   COMPOSE_FILE=docker-compose.ghcr.yml COMPOSE_PROFILES=jvm,android bash scripts/nas-deploy.sh
 #
 # 做的事：
 #   1. 自检 docker / compose 版本、磁盘、端口占用（启用 android 时查 /dev/kvm）
 #   2. 没有 .env 就从 .env.example 生成，PUID/PGID 自动填成当前用户
-#   3. docker compose up -d --build
-#   4. 轮询 /api/health，healthy 后打印访问地址与源统计
-#
-# 前置：能 clone 私有仓库（需要 PAT），且能拉 node:22-bookworm-slim 基础镜像。
-# 不想本地构建、想直接拉 GHCR 镜像的，看 docs/DEPLOY.md 路线 B。
+#   3. docker compose pull（--pull）或 build（默认）
+#   4. docker compose up -d，轮询 /api/health，就绪后打印地址与源统计
 # ============================================================================
 set -euo pipefail
 
@@ -31,10 +32,15 @@ cd "$ROOT"
 MODE="up"
 ARG_FILE=""
 ARG_PROFILES=""
+PULL_MODE=0
 for arg in "$@"; do
   case "$arg" in
     --upgrade) MODE="upgrade" ;;
     --check) MODE="check" ;;
+    --pull)
+      PULL_MODE=1
+      ARG_FILE="docker-compose.ghcr.yml"
+      ;;
     --nas) ARG_FILE="docker-compose.nas.yml" ;;
     --jvm) ARG_PROFILES="${ARG_PROFILES:+$ARG_PROFILES,}jvm" ;;
     --android) ARG_PROFILES="${ARG_PROFILES:+$ARG_PROFILES,}android" ;;
@@ -43,16 +49,21 @@ for arg in "$@"; do
       ARG_PROFILES="jvm,android"
       ;;
     --help | -h)
-      sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
       echo "未知参数：$arg" >&2
-      echo "可用：--upgrade --check --nas --jvm --android --all --help" >&2
+      echo "可用：--pull --upgrade --check --nas --jvm --android --all --help" >&2
       exit 2
       ;;
   esac
 done
+
+# --pull 与 --all 同时给时，--all 会把编排改回 nas.yml，这里纠正回来
+if [ "$PULL_MODE" = "1" ]; then
+  ARG_FILE="docker-compose.ghcr.yml"
+fi
 
 # 环境变量优先于参数，方便 CI / 脚本化调用
 COMPOSE_FILE="${COMPOSE_FILE:-${ARG_FILE:-docker-compose.yml}}"
@@ -152,10 +163,18 @@ else
   ok "端口 ${PORT_DEFAULT} 空闲"
 fi
 
-if [ -f Dockerfile ] && [ -d server ] && [ -d web ]; then
+if [ "$PULL_MODE" = "1" ]; then
+  ok "拉取模式：不构建，因此不需要源码目录"
+  # 私有仓库时这里要 docker login；仓库已公开也应该能连上。
+  GHCR_CODE="$(curl -s -o /dev/null -m 8 -w '%{http_code}' https://ghcr.io/v2/ 2>/dev/null || echo 000)"
+  case "$GHCR_CODE" in
+    200 | 401) ok "ghcr.io 可达（HTTP $GHCR_CODE）" ;;
+    *) warn "连不上 ghcr.io（HTTP $GHCR_CODE）—— 查 DNS / 代理 / registry mirror" ;;
+  esac
+elif [ -f Dockerfile ] && [ -d server ] && [ -d web ]; then
   ok "构建上下文完整"
 else
-  bad "缺 Dockerfile / server / web —— 需要整个仓库，不能只拷 compose 文件"
+  bad "缺 Dockerfile / server / web —— 本地构建需要整个仓库；只想拉镜像请加 --pull"
 fi
 
 if [ "$MODE" = "check" ]; then
@@ -170,12 +189,7 @@ echo "[2/5] 配置"
 
 if [ -f .env ]; then
   ok ".env 已存在，沿用"
-else
-  if [ ! -f .env.example ]; then
-    bad "找不到 .env.example"
-    exit 1
-  fi
-  cp .env.example .env
+elif [ -f .env.example ]; then
   UID_NOW="$(id -u)"
   GID_NOW="$(id -g)"
   # 原地改 PUID/PGID，避免 sed -i 在不同 busybox 上的差异
@@ -185,6 +199,24 @@ else
     { print }
   ' .env.example > .env
   ok "已生成 .env（PUID=${UID_NOW} PGID=${GID_NOW}，取自当前用户）"
+elif [ "$PULL_MODE" = "1" ]; then
+  UID_NOW="$(id -u)"
+  GID_NOW="$(id -g)"
+  {
+    echo "GHCR_OWNER=${GHCR_OWNER:-0uzu0}"
+    echo "NOVATV_TAG=${NOVATV_TAG:-latest}"
+    echo "NOVATV_PORT=8890"
+    echo "PUID=$UID_NOW"
+    echo "PGID=$GID_NOW"
+    echo "TZ=Asia/Shanghai"
+    echo "CONFIG_URL=http://www.饭太硬.cc/tv"
+    echo "CONFIG_URLS="
+    echo "SPIDER_TOKEN="
+  } > .env
+  ok "无 .env.example，已生成最小 .env（PUID=${UID_NOW} PGID=${GID_NOW}）"
+else
+  bad "找不到 .env.example，无法生成配置"
+  exit 1
 fi
 
 PUID_VAL="$(grep -E '^PUID=' .env | cut -d= -f2 | tr -d ' "' || true)"
@@ -201,19 +233,25 @@ if [ -n "${PUID_VAL:-}" ] && [ "$(id -u)" = "0" ]; then
   ok "data / reports 属主已对齐 ${PUID_VAL}:${PGID_VAL:-1000}"
 fi
 
-# ---------------------------------------------------------------- 3. 构建
+# ---------------------------------------------------------------- 3. 取镜像
 echo
-echo "[3/5] 构建镜像（首次 2~4 分钟，拉基础镜像 + 编译）"
-if [ "$MODE" = "upgrade" ]; then
-  if git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "  → git pull"
-    git pull --ff-only || warn "git pull 失败，用当前代码继续"
-  else
-    warn "不是 git 仓库，跳过 git pull"
+if [ "$PULL_MODE" = "1" ]; then
+  echo "[3/5] 拉取镜像（耗时取决于带宽；latest 每次都会查一次远端）"
+  "${DC[@]}" pull
+  ok "镜像已就绪"
+else
+  echo "[3/5] 构建镜像（首次 2~4 分钟，拉基础镜像 + 编译）"
+  if [ "$MODE" = "upgrade" ]; then
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+      echo "  → git pull"
+      git pull --ff-only || warn "git pull 失败，用当前代码继续"
+    else
+      warn "不是 git 仓库，跳过 git pull"
+    fi
   fi
+  "${DC[@]}" build
+  ok "镜像构建完成"
 fi
-"${DC[@]}" build
-ok "镜像构建完成"
 
 # ---------------------------------------------------------------- 4. 启动
 echo
@@ -262,7 +300,10 @@ echo
 DC_STR="${DC[*]}"
 # 反推出等价参数，让"升级"那行可以直接复制粘贴
 UP_ARGS=""
-case "$COMPOSE_FILE" in *nas*) UP_ARGS=" --nas" ;; esac
+case "$COMPOSE_FILE" in
+  *ghcr*) UP_ARGS=" --pull" ;;
+  *nas*) UP_ARGS=" --nas" ;;
+esac
 case "$COMPOSE_PROFILES" in
   *android*) UP_ARGS="$UP_ARGS --jvm --android" ;;
   *jvm*) UP_ARGS="$UP_ARGS --jvm" ;;

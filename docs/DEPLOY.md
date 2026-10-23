@@ -1,15 +1,17 @@
 # 部署：GitHub → NAS Docker 运行
 
-仓库已经推上去了：**https://github.com/0uzu0/novatv**（私有，分支 `main`）。
+仓库已经推上去了：**https://github.com/0uzu0/novatv**（公开，分支 `main`）。
 
 NAS 上有两条路，按你的 Docker 环境选：
 
 | 路线 | 需要 | 适合 |
 |---|---|---|
-| **A. 本地构建**（推荐） | NAS 能 clone 仓库、能拉基础镜像 | 私有仓库最省事，不用折腾 GHCR 登录 |
-| **B. 拉 CI 镜像** | GHCR 能认证（或包改公开） | NAS 不想跑构建，只想要一个镜像 |
+| **A. 本地构建** | NAS 能 clone 仓库、能拉基础镜像 | 想改代码，或不愿把镜像包设成公开 |
+| **B. 拉 CI 镜像**（推荐） | GHCR 上的包已改 public | 不编译，拉完即用，不占 NAS 的 CPU |
 
-两条路的 `docker-compose.yml` 是同一份，`build:` 段留着就是给路线 A 用的。
+镜像从哪来决定了用哪份编排：拉镜像用 `docker-compose.ghcr.yml`（无 `build:` 段），
+本机构建用 `docker-compose.yml`。
+更完整的 NAS 方案（三服务、五层验证、侧车接入）见 **[NAS-DEPLOY.md](NAS-DEPLOY.md)**。
 
 ---
 
@@ -50,7 +52,7 @@ smoke   → 真的把镜像跑起来，curl /api/health、首页、hls.min.js，
 
 ---
 
-## 三、路线 A：本地构建（推荐）
+## 三、路线 A：本地构建
 
 ### 3.1 在 NAS 上 clone
 
@@ -131,14 +133,25 @@ git pull && docker compose up -d --build
 
 ---
 
-## 四、路线 B：拉 CI 构建好的镜像
+## 四、路线 B：拉 CI 构建好的镜像（推荐）
 
-GHCR 的包**默认私有**，二选一。
+GHCR 的包**默认私有，而且不会随仓库转公开而自动转公开** —— 这是两个独立开关。
+不处理的话 `docker pull` 报 `unauthorized` / `denied`，报错里不会告诉你去哪儿改。
+二选一。
 
 ### 方案 B1：改成公开（NAS 端零配置）
 
-GitHub → 头像 → **Packages** → `novatv` → 右侧 **Package settings** →
-最底部 **Change visibility** → `Public`。`novatv-sidecar` 同理。
+直接打开包设置页，右侧 **Package settings** → 最底部 **Danger Zone** →
+**Change visibility** → `Public`：
+
+- <https://github.com/users/0uzu0/packages/container/novatv/settings>
+- <https://github.com/users/0uzu0/packages/container/novatv-sidecar/settings>
+
+改完验证（应为 `200`，不是 `401`）：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://ghcr.io/v2/0uzu0/novatv/tags/list
+```
 
 ### 方案 B2：保持私有，NAS 上登录
 
@@ -146,28 +159,35 @@ GitHub → 头像 → **Packages** → `novatv` → 右侧 **Package settings** 
 echo "<你的PAT>" | docker login ghcr.io -u 0uzu0 --password-stdin
 ```
 
-PAT 要勾 `read:packages`。群晖 Container Manager 没有登录入口，需要 SSH 进 NAS 执行；
+PAT 必须勾 `read:packages`（classic token）。注意 `gho_` 开头的 OAuth token
+换 registry token 会被拒（`permission_denied: ... does not match expected scopes`）。
+群晖 Container Manager 没有登录入口，需要 SSH 进 NAS 执行；
 威联通可以在 Container Station 的「注册表」里添加 `ghcr.io` 并填账号 + PAT。
 
 登录后：
 
 ```bash
 cp .env.example .env && vi .env      # PUID/PGID 同上
-docker compose pull
-docker compose up -d
+docker compose -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.ghcr.yml up -d
 ```
 
-不用 clone 整个仓库，只需要 `docker-compose.yml` + `.env`（`build:` 段会被 pull 绕过）。
+**用 `docker-compose.ghcr.yml` 而不是 `docker-compose.yml`**：后者带 `build:` 段，
+compose 的默认策略是「本地没有镜像就构建」，而 NAS 上没有源码就会报找不到 Dockerfile。
+
+也可以完全不用 clone 仓库，只把 `docker-compose.ghcr.yml` 和手写的 `.env` 放同一目录
+（两者都必须有 `.env`，否则变量全落到默认值）。
 
 ---
 
 ## 五、群晖 Container Manager 图形操作
 
-「项目」→ 新增 → 选择「创建 docker-compose.yml」→ 把 `docker-compose.yml` 内容贴进去 →
+「项目」→ 新增 → 选择「创建 docker-compose.yml」→ 把 **`docker-compose.ghcr.yml`** 内容贴进去 →
 **路径**填 `/volume1/docker/novatv` → 下一步 → 完成。
 环境变量在「项目」→ 你的项目 → 设置 → 环境变量里加，或者直接在 yml 里把 `${...}` 换成实际值。
 
-> 图形界面走的是路线 B。想走路线 A，SSH 进去 `docker compose up -d --build` 更直接。
+> 图形界面走的是路线 B（拉镜像），所以贴 `ghcr.yml` 那份。想走路线 A，SSH 进去
+> `docker compose up -d --build` 更直接。
 >
 > 群晖自带的 Docker 20.10 对多架构 manifest list 支持没问题（构建时已关掉 provenance，
 > 就是为了避开 OCI index 的兼容坑）。如果 `pull` 报 `manifest unknown`，
@@ -178,16 +198,18 @@ docker compose up -d
 ## 六、升级与回滚
 
 ```bash
-# 路线 A
+# 路线 A（本地构建）
 git pull && docker compose up -d --build
 
-# 路线 B：升级到最新
-docker compose pull && docker compose up -d
+# 路线 B（拉镜像）：升级到最新
+docker compose -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.ghcr.yml up -d
 
-# 钉住某个版本（.env 里改）
+# 钉住某个版本（改 .env 里的 NOVATV_TAG，然后用上面两条 pull/up）
 NOVATV_TAG=sha-a1b2c3d
-docker compose pull && docker compose up -d
 ```
+
+用脚本的话一行：`bash scripts/nas-deploy.sh --upgrade --pull`。
 
 `./data` 是唯一需要备份的目录（配置解码快照 + JS 模块缓存），丢了只是下次启动慢十秒，不是致命项。
 
