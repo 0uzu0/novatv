@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================================
-# NovaTV Spider 侧车 — 安卓设备一键部署（N1 刷回 Android 后 / 旧手机 / 电视盒子）
+# NovaTV Spider 侧车 — 安卓设备一键部署（redroid 容器 / 旧手机 / TV 盒子通用）
 #
 # 用法：
-#   bash sidecar/android/n1-setup.sh <设备IP> [token] [端口]
-#   bash sidecar/android/n1-setup.sh 192.168.1.50 novatv123
+#   bash sidecar/android/install-apk.sh <设备IP> [token] [端口]
+#   bash sidecar/android/install-apk.sh 192.168.1.50 novatv123
+#   ADB_PORT=5556 bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
 #
 # 做的事：
 #   1. adb 连接（网络 ADB，默认 5555）
@@ -14,7 +15,8 @@
 #   5. 打印 NAS 端要填的环境变量
 #
 # 前置：设备已开「开发者选项 → ADB 调试」，且与执行机同网段。
-#       N1 在 Armbian 上跑不了这个脚本（没有 adbd），先看 N1-ARMBIAN.md
+#       redroid 容器：先 docker compose -f docker-compose.redroid-x86.yml up -d，
+#       容器里 adbd 已监听 5555，直接对本机执行即可。
 # ============================================================================
 set -uo pipefail
 
@@ -34,7 +36,7 @@ ylw() { printf '\033[33m%s\033[0m\n' "$*"; }
 step() { printf '\n\033[36m== %s ==\033[0m\n' "$*"; }
 
 if [ -z "$IP" ]; then
-  red "用法: bash sidecar/android/n1-setup.sh <设备IP> [token] [端口]"
+  red "用法: bash sidecar/android/install-apk.sh <设备IP> [token] [端口]"
   exit 1
 fi
 
@@ -59,7 +61,7 @@ step "1/5 连接设备 $IP:$ADB_PORT"
 DEVS="$("$ADB" devices | tr -d '\r' | awk -F'\t' 'NR>1 && $2=="device"{print $1}')"
 if ! printf '%s\n' "$DEVS" | grep -qx "$IP:$ADB_PORT"; then
   red "连接失败。逐项检查："
-  echo "  - 设备与执行机是否同网段（N1 装 Android 后 IP 可能变了）"
+  echo "  - 设备与执行机是否同网段（redroid 容器直接对 127.0.0.1 即可）"
   echo "  - 开发者选项里「ADB 调试 / USB 调试」是否打开"
   echo "  - 若走 USB：直接 adb devices 看序列号，不用 connect"
   echo "  当前在线设备："; printf '%s\n' "${DEVS:-（无）}" | sed 's/^/    /'

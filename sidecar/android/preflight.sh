@@ -12,9 +12,11 @@
 #   1. binder  —— Android 的 IPC 驱动。宿主机内核没有
 #                 CONFIG_ANDROID_BINDER_IPC 就起不来，且 redroid 无法自带
 #   2. arch    —— 加固包的 .so 只有 ARMv7 / AArch64，没有 x86 版本。
-#                 x86_64 宿主必须靠 QEMU 用户态模拟（慢）或 native bridge（罕有）
+#                 x86_64 宿主必须靠镜像自带的 Native Bridge（libndk / libhoudini）
+#                 就地翻译；qemu 全栈模拟仅作兜底。详见 X86-NAS.md
 #   3. KVM     —— 只在用 QEMU 全系统模拟（qemu-system-aarch64）时需要
-#   4. binfmt  —— x86_64 宿主跑 arm64 镜像时，内核要注册 qemu-aarch64 处理器
+#   4. binfmt  —— 走 qemu-user 兜底路线时，内核要注册 qemu-aarch64 处理器
+#                 （Native Bridge 路线不需要，别多注册，否则会覆盖翻译层）
 #
 # 退出码：0 = 可以继续；1 = 有硬阻塞（看输出最后的「结论」）
 # ============================================================================

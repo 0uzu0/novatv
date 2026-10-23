@@ -40,25 +40,17 @@ Host APK（手机 / TV 盒子 / redroid 里的 ART）
 |---|---|---|
 | **A. 旧手机（推荐）** | 家里有闲置 Android 7+ 手机/平板/TV 盒子 | 手机要常插电、关省电限制 |
 | **B. 真机 + adb** | 手机和 NAS 不同网段，或只想临时跑 | 必须连着电脑/NAS 的 adb |
-| **C. redroid 容器** | 不想用手机，NAS 是 ARM 或愿意折腾转译 | x86 NAS 上 arm .so 需要转译，成功率不稳 |
+| **C. redroid 容器** | 不想用手机，NAS 是 x86_64 自建 Linux | 加固包只有 ARM 的 `.so`，必须走 Native Bridge |
 
-> **已经买好 / 正在用斐讯 N1？** 单独看 [`N1-ARMBIAN.md`](N1-ARMBIAN.md)：
-> N1 是 aarch64，与包内 `ftyguard_v8.so` 同架构，**可能不用刷机**就能在 Armbian 上开 redroid。
-> 那份文档先让你 30 秒判断「Armbian 装在 U 盘还是 eMMC」，再按 binder 预检结果分三条路线走。
+> **NAS 是 Intel / AMD（x86_64）？** 看 [`X86-NAS.md`](X86-NAS.md) —— 那是唯一的容器路线手册，
+> 含 30 秒可行性判定、五步操作、`/health` 判据、失败对照表，以及**明确的止损线**。
 >
-> 设备准备好之后，安装与启动统一用一键脚本：
+> 设备和容器都准备好之后，安装与启动统一用一键脚本（与架构无关）：
 >
 > ```bash
-> bash n1-setup.sh <设备IP> <token>     # 自动选 am startservice / start-foreground-service
+> bash install-apk.sh 127.0.0.1 novatv123   # redroid 容器直连
+> bash install-apk.sh 192.168.1.50 novatv123 # 手机 / TV 盒子
 > ```
->
-> N1 专用编排（720p / 1.2G 上限，通用版 3G 在 2GB 内存的 N1 上必然 OOM）：
-> `docker-compose.redroid-n1.yml`
->
-> **NAS 是 Intel / AMD（x86_64）？** 看 [`X86-NAS.md`](X86-NAS.md)。
-> 加固包只有 ARM 的 `.so`，x86 上必须走 Native Bridge：
-> `docker-compose.redroid-x86.yml`（自带 libndk_translation 的镜像）。
-> 能跑，但加固壳检测到模拟器时会失败，成功率明显低于真机。
 
 ### 形态 A：手机直连（不用电脑，推荐）
 
@@ -101,24 +93,21 @@ sudo bash sidecar/android/preflight.sh
 
 它会检查 binder 内核驱动、ashmem/memfd、KVM、binfmt、Docker 特权，并直接给结论。
 
-预检通过后：
+预检通过后按宿主架构选编排：
 
 ```bash
-# 宿主机准备（每次重启都要做，建议写进开机脚本）
-modprobe binder_linux devices="binder,hwbinder,vndbinder"
-mkdir -p /dev/binderfs && mount -t binder binder /dev/binderfs
+# 宿主准备（每次重启都要做，建议写进开机脚本）
+sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+sudo modprobe binfmt_misc
+mkdir -p /dev/binderfs && sudo mount -t binder binder /dev/binderfs
 
-# x86_64 宿主额外一步：注册 ARM 转译（只需一次）
-docker run --privileged --rm tonistiigi/binfmt --install arm64
+# x86_64（Intel / AMD）→ 用自带 Native Bridge 的镜像，不要额外注册 binfmt arm64
+docker compose -f sidecar/android/docker-compose.redroid-x86.yml up -d
+bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
 
-# 起容器
+# ARM64 → 通用编排
 docker compose -f sidecar/android/docker-compose.redroid.yml up -d
-
-# 装 APK（见下面的"构建 APK"）
-adb connect <NAS_IP>:5555
-adb install -r novatv-host.apk
-adb shell am start-foreground-service -n novatv.host/.HostService --es token xxx --ez lan true
-adb forward tcp:8898 tcp:8899
+bash sidecar/android/install-apk.sh <容器IP> novatv123
 ```
 
 关于 x86_64 宿主，必须把预期说清楚：
@@ -126,11 +115,15 @@ adb forward tcp:8898 tcp:8899
 | 宿主架构 | 能否原生跑 | 实际表现 |
 |---|---|---|
 | ARM64 | ✅ 同架构 | 正常，一次 spider 调用 0.3~1.5 s |
-| x86_64 | ⚠️ 靠 QEMU 转译 | ART 冷启动 5~15 分钟，单次调用数十秒，内存翻倍 |
+| x86_64 + Native Bridge | ⚠️ 靠 libndk / libhoudini 翻译 | 接近原生（ART 冷启动十几秒），但加固壳可能拒绝 |
+| x86_64 + qemu-user | ⚠️ 全栈模拟 | ART 冷启动 5~15 分钟，单次调用数十秒，仅兜底 |
 
 原因很硬：加固包里的 `ftyguard_v7.so` / `ftyguard_v8.so` 只有 **ELF32 ARM / ELF64 AArch64**，
 没有 x86 版本（`node scripts/extract-spider-libs.mjs` 会读 ELF header 打印出来）。
-x86 宿主只能让容器以 arm64 运行，逐条翻译 ARM 指令。
+x86 宿主要么让镜像自带翻译层就地翻译，要么让容器以 arm64 运行逐条翻译。
+
+**x86_64 的完整操作、判据与止损线见 [`X86-NAS.md`](X86-NAS.md)**——那份文档包含
+「30 秒可行性判定 / 五步操作 / `/health` 的唯一判据 / 失败特征对照 / 何时该停手」。
 
 > 加固壳还可能校验 ABI、模拟器特征、签名。**redroid 的成功率天然低于真机**，
 > 遇到壳直接退出属于预期内，不是配置错了。
@@ -190,7 +183,7 @@ POST /spider {"site":{"key":"...","api":"csp_WexDoubanGuard","ext":"",
    而 Android 7(API 24) 起 linker namespace 会拒绝从 app 可写目录 dlopen，
    只有 `targetSdk <= 23` 才走宽松策略。这一条改错，前面全白做。
 
-2. **x86 上没有 arm 转译** → `dlopen` 失败。换 ARM 机器/真机，或给 redroid 打 libndk 补丁。
+2. **x86 上没有 arm 转译** → `dlopen` 失败。换真机，或按 `X86-NAS.md` 用自带 Native Bridge 的镜像。
 
 3. **Android 8+ 前台服务 5 秒内必须挂通知**，否则被系统杀。`HostService` 已经处理。
 

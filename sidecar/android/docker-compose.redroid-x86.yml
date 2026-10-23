@@ -29,7 +29,7 @@
 # 启动：
 #   docker compose -f sidecar/android/docker-compose.redroid-x86.yml up -d
 #   adb connect NAS_IP:5555
-#   bash sidecar/android/n1-setup.sh NAS_IP novatv123   # 脚本本身与架构无关
+#   bash sidecar/android/install-apk.sh 127.0.0.1 novatv123   # 脚本与架构无关
 #
 # 说明：本编排未经 x86 真机验证（开发机无 Docker）。镜像 tag 与 command 参数
 #   取自 redroid-doc 与 erstt/redroid 的官方说明。
