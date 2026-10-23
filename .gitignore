@@ -21,3 +21,6 @@ sidecar/android/host-apk/app/build/
 sidecar/android/host-apk/.gradle/
 sidecar/android/host-apk/build/
 sidecar/android/host-apk/local.properties
+
+# 本地构建的 APK（CI 会重新出包）
+dist/*.apk

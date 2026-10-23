@@ -71,6 +71,9 @@ public class HostService extends Service {
   // 4 个线程并发进来，必须用并发容器
   private final Map<String, Object> spiders = new ConcurrentHashMap<String, Object>();
   private final Map<String, DexClassLoader> loaders = new ConcurrentHashMap<String, DexClassLoader>();
+  // 加固包解密后的真实加载器（DexNative.getLoader 返回），与上面的 loaders 不是同一个
+  private final Map<String, DexClassLoader> activeLoaders = new ConcurrentHashMap<String, DexClassLoader>();
+  private final Map<String, String> initErrors = new ConcurrentHashMap<String, String>();
   private final Map<String, Long> loadAttempts = new ConcurrentHashMap<String, Long>();
   private final List<String> logs = Collections.synchronizedList(new ArrayList<String>());
 
@@ -231,6 +234,8 @@ public class HostService extends Service {
         o.put("jarExists", new File(jarPath).exists());
         o.put("jarBytes", new File(jarPath).exists() ? new File(jarPath).length() : 0);
         o.put("loaded", new JSONArray(spiders.keySet()));
+        o.put("initErrors", new JSONObject(new java.util.TreeMap<String, String>(initErrors)));
+        o.put("libs", new File(getApplicationInfo().nativeLibraryDir).list());
         o.put("logs", new JSONArray(logs));
         resp = o.toString();
       } else if (path.startsWith("/load")) {
@@ -356,6 +361,8 @@ public class HostService extends Service {
       // 换包后旧实例必须全部作废，否则还指着老 dex
       spiders.clear();
       loaders.clear();
+      activeLoaders.clear();
+      initErrors.clear();
       jarPath = dst.getAbsolutePath();
 
       out.put("ok", true);
@@ -444,11 +451,15 @@ public class HostService extends Service {
 
   private static String hintFor(Throwable e) {
     String s = String.valueOf(e);
-    if (e instanceof UnsatisfiedLinkError || s.contains("dlopen")) {
-      return "native 库没加载：把 jar 里的 assets/wexguard_v8.so 放进 APK 的 jniLibs/arm64-v8a/libwexguard_v8.so 后重新打包；x86 模拟器缺 arm 转译";
+    if (e instanceof UnsatisfiedLinkError || s.contains("dlopen") || s.contains("couldn't find")) {
+      return "native 库没加载：确认 APK 的 lib/<abi>/lib*.so 与加固包 assets/*.so 同名对应；"
+          + "x86 设备缺少 arm 转译时也会这样";
     }
-    if (e instanceof ClassNotFoundException) {
-      return "找不到 csp_ 类：spider 包与配置不匹配，或 /load 下的是错的包";
+    if (e instanceof ClassNotFoundException || s.contains("NoClassDefFoundError")) {
+      return "缺宿主类：spider 包只含站点实现，父类 com.github.catvod.crawler.Spider 等必须由 APK 提供";
+    }
+    if (s.contains("DexNative")) {
+      return "加固壳解密失败：确认包内 assets/*.so 已按 ABI 打进 APK，且设备为 arm";
     }
     return "";
   }
@@ -466,33 +477,190 @@ public class HostService extends Service {
 
     File jar = new File(jarPath);
     if (!jar.exists()) throw new IllegalStateException("spider jar 不存在: " + jarPath);
+
+    DexClassLoader cl = activeLoaders.get(jarPath);
+    if (cl == null) {
+      synchronized (this) {
+        cl = activeLoaders.get(jarPath);
+        if (cl == null) {
+          cl = openJar(jarPath);
+          activeLoaders.put(jarPath, cl);
+        }
+      }
+    }
+
+    Class<?> c = Class.forName(className, true, cl);
+    Object o = c.getDeclaredConstructor().newInstance();
+    applySiteKeyAndInit(o, ext);
+    spiders.put(id, o);
+    log("loaded " + className + " via " + (isProtected(loaders.get(jarPath)) ? "DexNative" : "direct"));
+    return o;
+  }
+
+  /**
+   * 建 DexClassLoader 并完成 jar 初始化，返回「能真正加载站点类」的那个加载器。
+   *
+   * 两条路，与 TVBox 的 JarLoader/ProtectedInitJar 完全一致：
+   *
+   *  A. 普通 jar：直接 Init.init(Context)
+   *  B. 加固包（包内有 com.github.catvod.spider.DexNative）：
+   *     壳的 classes.dex 只是解密器，真实站点类由 DexNative 解密后装进一个新的 DexClassLoader。
+   *     必须走 Init.get() → 注入 Context → DexNative.getLoader(ctx) → 把返回的加载器
+   *     反射写回 Init 实例的 DexClassLoader 字段 → replaceCloudDiskNames() / startGoProxy(ctx)。
+   *     之后所有站点类都要从那个「新」加载器里取，用原来的 loader 一定 ClassNotFound。
+   */
+  private DexClassLoader openJar(String jarPath) throws Exception {
     File cache = new File(getFilesDir(), "dexout");
     if (!cache.exists()) cache.mkdirs();
 
-    DexClassLoader cl = loaders.get(jarPath);
-    if (cl == null) {
-      cl = new DexClassLoader(jarPath, cache.getAbsolutePath(), null, getClassLoader());
-      loaders.put(jarPath, cl);
-    }
-    Class<?> c = Class.forName(className, true, cl);
-    Object o = c.getDeclaredConstructor().newInstance();
+    DexClassLoader raw = new DexClassLoader(
+        jarPath, cache.getAbsolutePath(), cache.getAbsolutePath(), getClassLoader());
+    loaders.put(jarPath, raw);
 
-    // init(Context) 或 init(Context, String)
-    for (Method m : c.getMethods()) {
+    Context app = getApplicationContext();
+
+    // ---- B：加固包 ----
+    if (isProtected(raw)) {
+      try {
+        Class<?> initClz = raw.loadClass("com.github.catvod.spider.Init");
+
+        Object initObj = null;
+        try {
+          Method get = initClz.getMethod("get");
+          get.setAccessible(true);
+          initObj = get.invoke(null);
+        } catch (Throwable ignored) {
+        }
+
+        // Context 注入：优先字段名 c，其次任意 Context 类型字段
+        if (initObj != null) {
+          try {
+            java.lang.reflect.Field f = initClz.getDeclaredField("c");
+            f.setAccessible(true);
+            f.set(initObj, app);
+          } catch (Throwable ignored) {
+            for (java.lang.reflect.Field f : initClz.getDeclaredFields()) {
+              if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+              if (!Context.class.isAssignableFrom(f.getType())) continue;
+              try {
+                f.setAccessible(true);
+                f.set(initObj, app);
+              } catch (Throwable ignored2) {
+              }
+            }
+          }
+        }
+
+        Class<?> dexNative = raw.loadClass("com.github.catvod.spider.DexNative");
+        Object loaderObj = dexNative.getMethod("getLoader", Object.class).invoke(null, app);
+        if (!(loaderObj instanceof DexClassLoader)) {
+          initErrors.put(jarPath, "DexNative.getLoader 未返回 DexClassLoader: "
+              + (loaderObj == null ? "null" : loaderObj.getClass().getName()));
+          log("protected init 失败: " + initErrors.get(jarPath));
+          return raw;
+        }
+        DexClassLoader real = (DexClassLoader) loaderObj;
+
+        // 把解密后的加载器注入壳的 Init 实例（字段可能是继承来的）
+        if (initObj != null) {
+          for (Class<?> t = initClz; t != null; t = t.getSuperclass()) {
+            for (java.lang.reflect.Field f : t.getDeclaredFields()) {
+              if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+              if (!DexClassLoader.class.isAssignableFrom(f.getType())) continue;
+              try {
+                f.setAccessible(true);
+                f.set(initObj, real);
+              } catch (Throwable ignored) {
+              }
+            }
+          }
+        }
+
+        try {
+          initClz.getMethod("replaceCloudDiskNames").invoke(null);
+        } catch (Throwable ignored) {
+        }
+        try {
+          initClz.getMethod("startGoProxy", Context.class).invoke(null, app);
+        } catch (Throwable ignored) {
+        }
+
+        log("protected jar ready, real loader = " + real);
+        injectProxyPort(real);
+        return real;
+      } catch (Throwable e) {
+        initErrors.put(jarPath, String.valueOf(e));
+        log("protected init 异常，回落普通 init: " + e);
+      }
+    }
+
+    // ---- A：普通 jar ----
+    try {
+      Class<?> initClz = raw.loadClass("com.github.catvod.spider.Init");
+      try {
+        initClz.getMethod("init", Context.class).invoke(null, app);
+      } catch (Throwable ignored) {
+      }
+    } catch (Throwable ignored) {
+    }
+    injectProxyPort(raw);
+    return raw;
+  }
+
+  /**
+   * 把侧车端口告诉 spider，这样 csp_* 里的 proxy() 才能生成可访问的代理地址。
+   * 类名两个位置都试：TVBox 用 com.github.catvod.Proxy，jar 里是 com.github.catvod.spider.Proxy。
+   */
+  private void injectProxyPort(DexClassLoader loader) {
+    for (String cls : new String[]{"com.github.catvod.Proxy", "com.github.catvod.spider.Proxy"}) {
+      try {
+        Class<?> c = loader.loadClass(cls);
+        for (Method m : c.getMethods()) {
+          if (!"set".equals(m.getName())) continue;
+          Class<?>[] ps = m.getParameterTypes();
+          if (ps.length == 1 && (ps[0] == int.class || ps[0] == Integer.class)) {
+            m.invoke(null, port);
+            return;
+          }
+        }
+      } catch (Throwable ignored) {
+      }
+    }
+  }
+
+  /** 包内有 DexNative 就是加固包：壳的 classes.dex 只有解密器 */
+  private static boolean isProtected(DexClassLoader raw) {
+    if (raw == null) return false;
+    try {
+      raw.loadClass("com.github.catvod.spider.DexNative");
+      return true;
+    } catch (Throwable e) {
+      return false;
+    }
+  }
+
+  /** ext 与 siteKey 是很多站点的必需输入，缺了会直接空结果 */
+  private void applySiteKeyAndInit(Object spider, String ext) {
+    try {
+      java.lang.reflect.Field f = spider.getClass().getField("siteKey");
+      f.set(spider, "");
+    } catch (Throwable ignored) {
+    }
+    for (Method m : spider.getClass().getMethods()) {
       if (!"init".equals(m.getName())) continue;
       Class<?>[] ps = m.getParameterTypes();
-      if (ps.length == 1) {
-        m.invoke(o, this);
-        break;
-      }
-      if (ps.length == 2 && ps[1] == String.class) {
-        m.invoke(o, this, ext);
-        break;
+      try {
+        if (ps.length == 1 && Context.class.isAssignableFrom(ps[0])) {
+          m.invoke(spider, this);
+          return;
+        }
+        if (ps.length == 2 && Context.class.isAssignableFrom(ps[0]) && ps[1] == String.class) {
+          m.invoke(spider, this, ext == null ? "" : ext);
+          return;
+        }
+      } catch (Throwable ignored) {
       }
     }
-    spiders.put(id, o);
-    log("loaded " + className);
-    return o;
   }
 
   private String resolveClass(String api) {
@@ -510,8 +678,10 @@ public class HostService extends Service {
     }
     if ("category".equals(method)) {
       HashMap<String, String> f = new HashMap<String, String>();
-      return c.getMethod("categoryContent", String.class, boolean.class, HashMap.class)
-          .invoke(sp, p.optString("tid"), false, f);
+      // 真实签名是 categoryContent(String tid, String pg, boolean filter, HashMap extend)
+      // 少传一个 pg 会直接 NoSuchMethodException，分类页整页打不开
+      return c.getMethod("categoryContent", String.class, String.class, boolean.class, HashMap.class)
+          .invoke(sp, p.optString("tid"), String.valueOf(p.optInt("pg", 1)), false, f);
     }
     if ("detail".equals(method)) {
       List<String> ids = new ArrayList<String>();
