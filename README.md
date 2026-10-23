@@ -173,6 +173,14 @@ POST /spider
 - **46 个 jar 源**：加固包（dex 仅 36.9 KB，真逻辑在 1.33 MB 的 guard 里），JVM/Node 都拿不到字节码，
   只能交给 Android 侧车。未接设备前它们在 `/api/sources` 里是 `supported:false`，搜索会被跳过并给出原因。
   完整取舍见 [docs/RUNTIME.md](docs/RUNTIME.md)。
+
+  guard 已被逐字节解剖过（[docs/GUARD-ANALYSIS.md](docs/GUARD-ANALYSIS.md)）：它外层是**明文 ZIP 头
+  + DEFLATE 声明**，里面装一个 2.8 MB 的 `classes.dex`（正是 Multidex 的 secondary-dex 格式），
+  但数据体被二次加密（熵 7.99，单字节 XOR 全量试过不成立）。解密在 `.so` 里，两个 .so 都**没有
+  `Java_*` 导出符号**、只有 `JNI_OnLoad`，且被 OLLVM 的 `.datadiv_decode` 加密了字符串，
+  方法靠 `RegisterNatives` 动态注册。壳 dex 里能看到 `decrypt` / `noxSign` / `native_ting_md5`，
+  说明还有签名校验链。**所以硬约束是真约束，不是没找对方法**；同时也说明「加固」与
+  「能用采集接口替代」几乎互斥——实测 libvio 是地域墙、xb6v 是下载站、S_zps 是盘搜，都不是 CMS。
 - **其中 3 个已经不用 Android 了**：`node scripts/oss-spider.mjs --verify` 会把 CatVodSpider
   历史快照里的同名开源实现编成 `oss-spiders-<hash>.jar`，冒烟通过后主服务自动替换
   `csp_XxxGuard`（目前是 Dm84 / 看球 / Aid）。编得过但跑不起来的不替换——**不假装能播**。
