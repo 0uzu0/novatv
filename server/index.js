@@ -121,11 +121,14 @@ async function runtimeMissing(res, site) {
       ? {
           why: '加固包的 classes.dex 只是壳，真实字节码在 assets/*.guard 里，由 ARM 的 .so 解密后交给 ART；JVM / Node 都拿不到',
           how: [
-            '1) 预检宿主能否跑 Android 容器：sudo bash sidecar/android/preflight.sh',
-            '2) x86_64 宿主先注册 ARM 转译：docker run --privileged --rm tonistiigi/binfmt --install arm64',
-            '3) 起容器：docker compose -f sidecar/android/docker-compose.redroid.yml up -d',
-            '4) 装 Host APK 并启动侧车，然后设 SPIDER_ANDROID_URL=http://<设备IP>:8899',
-            '（有闲置安卓手机/TV 盒子时优先用真机，成功率远高于 redroid）',
+            '1) 预检宿主该走哪条路线：sudo bash sidecar/android/preflight.sh',
+            '2) 有 /dev/kvm → 起 KVM 虚拟机里的 Android：',
+            '   docker compose -f docker-compose.nas.yml --profile android up -d',
+            '   再装 APK：ADB_PORT=15555 bash sidecar/android/install-apk.sh 127.0.0.1 <token>',
+            '3) 有 binder → 起 redroid：docker compose -f sidecar/android/docker-compose.redroid-x86.yml up -d',
+            '4) 设 SPIDER_ANDROID_URL 指过去（容器形态填 http://host.docker.internal:8899）',
+            '（有闲置安卓手机/TV 盒子时优先用真机，成功率 100%）',
+            '详见 docs/NAS-DEPLOY.md 第六节',
           ],
         }
       : {

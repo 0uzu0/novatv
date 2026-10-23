@@ -83,8 +83,23 @@ docker compose pull && docker compose up -d
 docker compose -f docker-compose.yml -f docker-compose.sidecar.yml up -d --build
 ```
 
-完整步骤、PAT 获取、群晖/威联通图形入口、把开源 spider 产物搬上 NAS、升级回滚与排障
-见 **[docs/DEPLOY.md](docs/DEPLOY.md)**。
+### 想一次配齐三个服务（主服务 + 两侧车）
+
+用一体化编排，`profile` 控制规模，**不用改文件**：
+
+```bash
+cp .env.example .env && vi .env    # 改 PUID/PGID、设 SPIDER_TOKEN
+
+docker compose -f docker-compose.nas.yml up -d --build                            # 只要主服务
+docker compose -f docker-compose.nas.yml --profile jvm up -d --build              # + JVM 侧车
+docker compose -f docker-compose.nas.yml --profile jvm --profile android up -d --build  # + Android 侧车
+```
+
+完整方案（前置判定、五层验证、Android 侧车接入、开机自启、排障表）见
+**[docs/NAS-DEPLOY.md](docs/NAS-DEPLOY.md)**。
+
+最小部署的完整步骤、PAT 获取、群晖/威联通图形入口、把开源 spider 产物搬上 NAS、
+升级回滚与排障见 **[docs/DEPLOY.md](docs/DEPLOY.md)**。
 
 ## 目录结构
 
@@ -126,13 +141,15 @@ novatv/
 │  └─ shot.mjs              # 无头截图（CDP）
 ├─ Dockerfile               # 主服务镜像（node:22-slim + curl + tini）
 ├─ Dockerfile.sidecar       # JVM 侧车镜像（jdk 编译 → jre 运行）
-├─ docker-compose.yml       # NAS 部署编排
+├─ docker-compose.yml       # NAS 最小编排（只起主服务）
 ├─ docker-compose.sidecar.yml  # 侧车叠加层（-f 叠加使用）
+├─ docker-compose.nas.yml   # NAS 一体化编排（profile 控制：主服务 / +jvm / +android）
 ├─ .github/workflows/docker.yml  # lint → 多架构构建 → 推 GHCR → 冒烟测试
 └─ docs/
    ├─ ANALYSIS.md           # 两个参考项目的拆解与设计映射
    ├─ RUNTIME.md            # 运行时方案：jar/JS/Android 四条路怎么选
-   ├─ DEPLOY.md             # GitHub Actions 打包 + NAS Docker 部署
+   ├─ NAS-DEPLOY.md         # NAS 完整部署方案（三层结构、五层验证、侧车接入）
+   ├─ DEPLOY.md             # GitHub Actions 打包 + 最小 Docker 部署
    └─ VALIDATION.md         # 真实验证报告
 ```
 

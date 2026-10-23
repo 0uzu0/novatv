@@ -2,13 +2,19 @@
 # ============================================================================
 # NovaTV —— NAS 一键部署（本地构建路线）
 #
-# 用法（在仓库根目录，或用 -C 指定）：
-#   bash scripts/nas-deploy.sh            # 构建并启动
-#   bash scripts/nas-deploy.sh --upgrade  # git pull 后重建
-#   bash scripts/nas-deploy.sh --check    # 只做环境自检，不动容器
+# 用法（在仓库根目录）：
+#   bash scripts/nas-deploy.sh                 # 最小部署：只起主服务
+#   bash scripts/nas-deploy.sh --nas           # 改用一体化编排 docker-compose.nas.yml
+#   bash scripts/nas-deploy.sh --nas --jvm     # 一体化 + JVM 侧车
+#   bash scripts/nas-deploy.sh --all           # 全量 = --nas --jvm --android
+#   bash scripts/nas-deploy.sh --check         # 只做环境自检，不动容器
+#   bash scripts/nas-deploy.sh --upgrade       # git pull 后重建
+#
+# 参数可组合，顺序无关。也可用环境变量覆盖（Linux/NAS 上更顺手）：
+#   COMPOSE_FILE=docker-compose.nas.yml COMPOSE_PROFILES=jvm,android bash scripts/nas-deploy.sh
 #
 # 做的事：
-#   1. 自检 docker / compose 版本、磁盘、端口占用
+#   1. 自检 docker / compose 版本、磁盘、端口占用（启用 android 时查 /dev/kvm）
 #   2. 没有 .env 就从 .env.example 生成，PUID/PGID 自动填成当前用户
 #   3. docker compose up -d --build
 #   4. 轮询 /api/health，healthy 后打印访问地址与源统计
@@ -21,20 +27,47 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# 先解析参数（顺序无关，可组合），再决定用哪份编排
 MODE="up"
-case "${1:-}" in
-  --upgrade) MODE="upgrade" ;;
-  --check) MODE="check" ;;
-  --help | -h)
-    sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-    exit 0
-    ;;
-  "") ;;
-  *)
-    echo "未知参数：$1（可用 --upgrade / --check）" >&2
-    exit 2
-    ;;
-esac
+ARG_FILE=""
+ARG_PROFILES=""
+for arg in "$@"; do
+  case "$arg" in
+    --upgrade) MODE="upgrade" ;;
+    --check) MODE="check" ;;
+    --nas) ARG_FILE="docker-compose.nas.yml" ;;
+    --jvm) ARG_PROFILES="${ARG_PROFILES:+$ARG_PROFILES,}jvm" ;;
+    --android) ARG_PROFILES="${ARG_PROFILES:+$ARG_PROFILES,}android" ;;
+    --all)
+      ARG_FILE="docker-compose.nas.yml"
+      ARG_PROFILES="jvm,android"
+      ;;
+    --help | -h)
+      sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "未知参数：$arg" >&2
+      echo "可用：--upgrade --check --nas --jvm --android --all --help" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# 环境变量优先于参数，方便 CI / 脚本化调用
+COMPOSE_FILE="${COMPOSE_FILE:-${ARG_FILE:-docker-compose.yml}}"
+COMPOSE_PROFILES="${COMPOSE_PROFILES:-${ARG_PROFILES}}"
+
+if [ ! -f "$COMPOSE_FILE" ]; then
+  echo "找不到编排文件：$COMPOSE_FILE" >&2
+  exit 2
+fi
+
+DC=(docker compose -f "$COMPOSE_FILE")
+if [ -n "$COMPOSE_PROFILES" ]; then
+  # 逗号或空格分隔都认
+  for p in ${COMPOSE_PROFILES//,/ }; do DC+=(--profile "$p"); done
+fi
 
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -83,6 +116,23 @@ case "$ARCH" in
   aarch64 | arm64) ok "架构 $ARCH（镜像原生支持）" ;;
   *) warn "架构 $ARCH 未验证，可能没有对应基础镜像" ;;
 esac
+
+# 启用 android profile 时，/dev/kvm 是硬前提 —— 早失败好过构建完才发现
+WANT_ANDROID=0
+if printf '%s\n' "${COMPOSE_PROFILES//,/ }" | tr ' ' '\n' | grep -qx android; then
+  WANT_ANDROID=1
+fi
+if [ "$WANT_ANDROID" = "1" ]; then
+  if [ -e /dev/kvm ]; then
+    KVM_GID="$(stat -c '%g' /dev/kvm 2>/dev/null || echo '')"
+    ok "/dev/kvm 存在（Android 侧车可用，gid=${KVM_GID:-?}）"
+    dim "  若容器日志报 permission denied /dev/kvm，把 gid 填进编排的 group_add"
+  else
+    bad "启用了 android profile，但这台机器没有 /dev/kvm —— 模拟器起不来"
+    dim "  BIOS 开 VT-x/AMD-V，或直接改用真机："
+    dim "  bash sidecar/android/install-apk.sh <手机IP> novatv123"
+  fi
+fi
 
 AVAIL="$(df -Pk . | awk 'NR==2 {print int($4/1024)}')"
 if [ "${AVAIL:-0}" -lt 3000 ]; then
@@ -144,6 +194,8 @@ dim "  PUID=${PUID_VAL:-1000}  PGID=${PGID_VAL:-1000}"
 dim "  CONFIG_URL=${CONFIG_VAL:-<默认>}"
 
 mkdir -p data reports
+# Android 侧车要持久化 AVD，否则每次重启都要重装 APK
+[ "$WANT_ANDROID" = "1" ] && mkdir -p data-android
 if [ -n "${PUID_VAL:-}" ] && [ "$(id -u)" = "0" ]; then
   chown -R "${PUID_VAL}:${PGID_VAL:-1000}" data reports 2>/dev/null || true
   ok "data / reports 属主已对齐 ${PUID_VAL}:${PGID_VAL:-1000}"
@@ -160,13 +212,13 @@ if [ "$MODE" = "upgrade" ]; then
     warn "不是 git 仓库，跳过 git pull"
   fi
 fi
-docker compose build
+"${DC[@]}" build
 ok "镜像构建完成"
 
 # ---------------------------------------------------------------- 4. 启动
 echo
 echo "[4/5] 启动容器"
-docker compose up -d
+"${DC[@]}" up -d
 ok "容器已启动"
 
 # ---------------------------------------------------------------- 5. 等就绪
@@ -188,7 +240,7 @@ echo
 
 if [ "$READY" != "1" ]; then
   red "90 秒内未就绪。最近日志："
-  docker compose logs --tail=40 novatv || true
+  "${DC[@]}" logs --tail=40 novatv || true
   exit 1
 fi
 
@@ -207,7 +259,18 @@ echo "════════════════════════�
 green " 打开：http://${IP}:${PORT}"
 echo "════════════════════════════════════════════"
 echo
-dim "常用命令："
-dim "  docker compose logs -f          看日志"
-dim "  docker compose restart novatv   重启"
-dim "  bash scripts/nas-deploy.sh --upgrade   升级"
+DC_STR="${DC[*]}"
+# 反推出等价参数，让"升级"那行可以直接复制粘贴
+UP_ARGS=""
+case "$COMPOSE_FILE" in *nas*) UP_ARGS=" --nas" ;; esac
+case "$COMPOSE_PROFILES" in
+  *android*) UP_ARGS="$UP_ARGS --jvm --android" ;;
+  *jvm*) UP_ARGS="$UP_ARGS --jvm" ;;
+esac
+
+dim "常用命令（本次用的编排：${COMPOSE_FILE}${COMPOSE_PROFILES:+，profile=${COMPOSE_PROFILES}}）："
+dim "  ${DC_STR} logs -f              看日志"
+dim "  ${DC_STR} restart novatv       重启"
+dim "  ${DC_STR} ps                   看状态"
+dim "  bash scripts/nas-deploy.sh --upgrade${UP_ARGS}"
+dim "                                    升级"

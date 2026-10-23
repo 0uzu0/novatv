@@ -131,7 +131,7 @@ export class SpiderBridgeAdapter {
         spider: { kind: diag.kind, verdict: diag.verdict, guardBytes: diag.guardBytes },
         fix:
           diag.kind === 'android-hardened' || diag.kind === 'android-dex'
-            ? '加固包必须跑在 Android 里：起 sidecar/android/docker-compose.redroid.yml，装 Host APK 后设置 SPIDER_ANDROID_URL'
+            ? '加固包必须跑在 Android 里：有 /dev/kvm 就用 docker compose -f docker-compose.nas.yml --profile android 起 KVM 模拟器，否则用真机；详见 docs/NAS-DEPLOY.md 第六节，再把 SPIDER_ANDROID_URL 指过去'
             : '普通 jar 可起 JVM 侧车：node scripts/jvm-sidecar.mjs，并设置 SPIDER_JVM_URL',
       };
       throw err;
@@ -168,7 +168,7 @@ export class SpiderBridgeAdapter {
       tried,
       spiderKind: diag.kind,
       fix: needAndroid
-        ? '先起 sidecar/android/docker-compose.redroid.yml，装 Host APK，再把 SPIDER_ANDROID_URL 指过去'
+        ? '先按 docs/NAS-DEPLOY.md 第六节起 Android 侧车（KVM 模拟器或真机），再把 SPIDER_ANDROID_URL 指过去'
         : '起 JVM 侧车 node scripts/jvm-sidecar.mjs，或检查 SPIDER_JVM_URL',
     };
     throw err;

@@ -4,6 +4,7 @@
 .gitignore
 node_modules
 data
+data-android
 reports
 sidecar/jvm/build
 sidecar/android

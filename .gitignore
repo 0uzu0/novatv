@@ -2,6 +2,8 @@
 # 保留目录本身，否则 git clone 后 docker 会以 root 身份创建 data/，导致容器内写不进去
 data/*
 !data/.gitkeep
+# Android 侧车的 AVD（体积大，不纳入版本控制）
+data-android/
 reports/*.json
 sidecar/jvm/build/
 

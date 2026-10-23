@@ -99,8 +99,10 @@ services:
       - "6081:6080"
 
     volumes:
-      # 持久化 /data，避免每次重启都要重装 APK（镜像默认每次清空 AVD）
-      - ./data-qemu:/home/androidusr
+      # 只持久化 AVD 目录，不要挂整个 /home/androidusr ——
+      # 镜像的 entrypoint 脚本就在那个目录里，bind mount 会盖掉它，
+      # 容器启动直接失败（找不到 entrypoint）。
+      - ./data-qemu:/home/androidusr/.android
 
     environment:
       TZ: Asia/Shanghai

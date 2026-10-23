@@ -148,8 +148,11 @@ echo "  命令: $CMD （SDK=${SDK:-?}；API 26 才支持 start-foreground-servic
 #   绕开所有端口映射和 NAT 问题 —— 对 redroid、QEMU 模拟器、真机都成立。
 step "3.5/5 建立 adb 端口转发"
 FORWARDED=0
-if "$ADB" -s "$SERIAL" forward "tcp:$PORT" "tcp:$PORT" >/dev/null 2>&1; then
-  grn "  localhost:$PORT → 设备内 $PORT"
+# -a = 监听所有网卡。这一位不能省：主服务跑在容器里，它眼里的「宿主」
+# 是 docker0 网桥（host.docker.internal），而 adb forward 默认只绑 127.0.0.1，
+# 容器侧连不上，会表现为「主服务报侧车不可用、但宿主 curl 明明是通的」。
+if "$ADB" -a -s "$SERIAL" forward "tcp:$PORT" "tcp:$PORT" >/dev/null 2>&1; then
+  grn "  0.0.0.0:$PORT → 设备内 $PORT（局域网可达，有 token 保护）"
   FORWARDED=1
 else
   ylw "  adb forward 失败（真机直连不受影响；容器/模拟器部署才依赖它）"
@@ -208,19 +211,25 @@ step "5/5 NAS 端配置"
 #   走直连 → 直接用设备 IP（真机 / 已映射端口的容器）
 #   走转发 → 说明设备藏在 NAT 或容器网络后面，NAS 那边不能照抄 127.0.0.1
 if [ "$HEALTH_URL" = "http://127.0.0.1:$PORT" ] && [ "$FORWARDED" = 1 ]; then
-  SIDECAR_HINT="http://<这台执行机的局域网IP>:$PORT"
+  SIDECAR_HINT="http://host.docker.internal:$PORT"
   cat <<EOF
-  注意：本次是通过 adb forward 才连上的，说明侧车在容器/模拟器里、宿主连不到它的网卡。
+  注意：本次是靠 adb forward 才连上的，说明侧车在容器/模拟器里、藏在 NAT 后面。
+  「宿主能 curl 通」不等于「主服务容器也能通」，别把 127.0.0.1 抄进去。
 
-  ${ylw}NAS 与执行机不是同一台${RST}时，上面这个 127.0.0.1 在 NAS 上指的是 NAS 自己，
-  不能用。必须先让 NAS 能路由到侧车，二选一：
+  ${ylw}主服务跑在同一台机器的 Docker 里（最常见）${RST}，填这个：
 
-    1) 给容器补端口映射（推荐，redroid / QEMU 编排里都已加好）
-         ports: [ "$PORT:$PORT" ]
-       然后 NAS 填 http://<执行机局域网IP>:$PORT
+    SPIDER_ANDROID_URL=http://host.docker.internal:$PORT
 
-    2) 两边在同一 docker 网络里，直接用容器名
-         SPIDER_ANDROID_URL: "http://novatv-android-emu:$PORT"
+  前提是主服务的编排里有这一行（docker-compose.nas.yml 已经写好了）：
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  ${DIM}说明：上面的 0.0.0.0:$PORT 监听在宿主，容器通过 docker0 网桥访问得到。${RST}
+
+  ${ylw}主服务和侧车不是同一台机器${RST}，改填执行机的局域网地址：
+
+    SPIDER_ANDROID_URL=http://<执行机局域网IP>:$PORT
 
 EOF
 else
