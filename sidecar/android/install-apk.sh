@@ -5,18 +5,23 @@
 # 用法：
 #   bash sidecar/android/install-apk.sh <设备IP> [token] [端口]
 #   bash sidecar/android/install-apk.sh 192.168.1.50 novatv123
-#   ADB_PORT=5556 bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
+#   ADB_PORT=15555 bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
+#
+#   容器/模拟器部署时 ADB 端口一律是 15555（宿主 adb server 占着 5555，
+#   编排里特意映射成 15555:5555）。
 #
 # 做的事：
 #   1. adb 连接（网络 ADB，默认 5555）
 #   2. 安装 dist/novatv-host.apk
 #   3. 按 SDK 版本选正确启动命令（API<26 只能 am startservice）
-#   4. 拉 /health，校验 .so 与服务状态
-#   5. 打印 NAS 端要填的环境变量
+#   4. adb forward 打通 8899，绕开容器网络与 QEMU NAT
+#   5. 拉 /health，校验 .so 与服务状态
+#   6. 打印 NAS 端要填的环境变量
 #
 # 前置：设备已开「开发者选项 → ADB 调试」，且与执行机同网段。
-#       redroid 容器：先 docker compose -f docker-compose.redroid-x86.yml up -d，
-#       容器里 adbd 已监听 5555，直接对本机执行即可。
+#       容器形态二选一，先起容器再跑本脚本：
+#         redroid（需宿主 binder）：docker compose -f sidecar/android/docker-compose.redroid-x86.yml up -d
+#         QEMU  （需 /dev/kvm）    ：docker compose -f sidecar/android/docker-compose.qemu-android.yml up -d
 # ============================================================================
 set -uo pipefail
 
@@ -135,19 +140,40 @@ fi
 echo "  命令: $CMD （SDK=${SDK:-?}；API 26 才支持 start-foreground-service）"
 "$ADB" -s "$SERIAL" shell $CMD -n "$SVC" --es token "$TOKEN" --ez lan true 2>&1 | sed 's/^/  /'
 
+# ---------------------------------------------------------------- 3.5 端口转发
+# 为什么需要这一步：
+#   容器 / 模拟器里的 Android 有自己的网络命名空间或 QEMU NAT，
+#   宿主/执行机 ping 得到它的端口，却不一定连得通（QEMU 的 guest IP 是 10.0.2.15，
+#   宿主根本路由不到）。adb forward 把执行机的 localhost:8899 直接捅到设备内网卡，
+#   绕开所有端口映射和 NAT 问题 —— 对 redroid、QEMU 模拟器、真机都成立。
+step "3.5/5 建立 adb 端口转发"
+FORWARDED=0
+if "$ADB" -s "$SERIAL" forward "tcp:$PORT" "tcp:$PORT" >/dev/null 2>&1; then
+  grn "  localhost:$PORT → 设备内 $PORT"
+  FORWARDED=1
+else
+  ylw "  adb forward 失败（真机直连不受影响；容器/模拟器部署才依赖它）"
+fi
+
 # ---------------------------------------------------------------- 4 验证
 step "4/5 等待服务并验证"
 HE=""
+HEALTH_URL=""
 for i in 1 2 3 4 5 6 7 8 9 10; do
   sleep 1
+  # 先试转发通道，再试直连 IP。
   # --noproxy '*' 必须加：执行机若设了 HTTP_PROXY（Clash/v2ray 很常见），
   # curl 会把局域网 IP 也丢给代理，结果永远是"无响应"——而服务其实是好的。
+  if [ "$FORWARDED" = 1 ]; then
+    HE="$(curl -s -m 4 --noproxy '*' "http://127.0.0.1:$PORT/health?token=$TOKEN" 2>/dev/null)"
+    [ -n "$HE" ] && { HEALTH_URL="http://127.0.0.1:$PORT"; break; }
+  fi
   HE="$(curl -s -m 4 --noproxy '*' "http://$IP:$PORT/health?token=$TOKEN" 2>/dev/null)"
-  [ -n "$HE" ] && break
+  [ -n "$HE" ] && { HEALTH_URL="http://$IP:$PORT"; break; }
 done
 
 if [ -z "$HE" ]; then
-  red "  /health 无响应（10 秒）"
+  red "  /health 无响应（10 秒，已试转发通道与直连）"
   echo "  看服务日志："
   "$ADB" -s "$SERIAL" logcat -d -s NovaTVHost 2>/dev/null | tail -20 | sed 's/^/    /'
   echo "  常见原因：服务被系统冻结 / 不是 lan=true / 端口被占 / 设备非 Android"
@@ -178,11 +204,34 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
 
 # ---------------------------------------------------------------- 5 下一步
 step "5/5 NAS 端配置"
+# 侧车地址取哪个，取决于刚才哪条通道通了：
+#   走直连 → 直接用设备 IP（真机 / 已映射端口的容器）
+#   走转发 → 说明设备藏在 NAT 或容器网络后面，NAS 那边不能照抄 127.0.0.1
+if [ "$HEALTH_URL" = "http://127.0.0.1:$PORT" ] && [ "$FORWARDED" = 1 ]; then
+  SIDECAR_HINT="http://<这台执行机的局域网IP>:$PORT"
+  cat <<EOF
+  注意：本次是通过 adb forward 才连上的，说明侧车在容器/模拟器里、宿主连不到它的网卡。
+
+  ${ylw}NAS 与执行机不是同一台${RST}时，上面这个 127.0.0.1 在 NAS 上指的是 NAS 自己，
+  不能用。必须先让 NAS 能路由到侧车，二选一：
+
+    1) 给容器补端口映射（推荐，redroid / QEMU 编排里都已加好）
+         ports: [ "$PORT:$PORT" ]
+       然后 NAS 填 http://<执行机局域网IP>:$PORT
+
+    2) 两边在同一 docker 网络里，直接用容器名
+         SPIDER_ANDROID_URL: "http://novatv-android-emu:$PORT"
+
+EOF
+else
+  SIDECAR_HINT="http://$IP:$PORT"
+fi
+
 cat <<EOF
   在 NAS 的 docker-compose.yml（或 .env）里加：
 
     environment:
-      SPIDER_ANDROID_URL: "http://$IP:$PORT"
+      SPIDER_ANDROID_URL: "$SIDECAR_HINT"
       SPIDER_TOKEN: "$TOKEN"
 
   然后 docker compose up -d，再用这条验证加固源是否转为可播：

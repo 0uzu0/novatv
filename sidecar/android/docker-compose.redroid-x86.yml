@@ -28,8 +28,8 @@
 #
 # 启动：
 #   docker compose -f sidecar/android/docker-compose.redroid-x86.yml up -d
-#   adb connect NAS_IP:5555
-#   bash sidecar/android/install-apk.sh 127.0.0.1 novatv123   # 脚本与架构无关
+#   ADB_PORT=15555 bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
+#   （端口用 15555 是因为 5555 被宿主 adb server 占了，映射时故意错开）
 #
 # 说明：本编排未经 x86 真机验证（开发机无 Docker）。镜像 tag 与 command 参数
 #   取自 redroid-doc 与 erstt/redroid 的官方说明。
@@ -46,7 +46,12 @@ services:
     privileged: true
 
     ports:
-      - "5555:5555"   # adb：只有侧车安装阶段用得到
+      # 宿主 15555 → 容器 5555。
+      # 必须错开 5555：宿主自己的 adb server 默认就监听 5555，写成 "5555:5555"
+      # 会让 adb 把本机当成一个永远 offline 的 emulator-5554，之后就再也连不上。
+      - "15555:5555"
+      # 侧车 HTTP：主服务（:8890）要靠它访问 /health 与 /spider
+      - "8899:8899"
 
     volumes:
       # Android /data 必须持久化，否则每次重启都要重装 APK

@@ -2,23 +2,28 @@
 # ============================================================================
 # NovaTV · redroid 可行性预检
 #
-# 目的：在 NAS 上花 10 秒判断「这台机器到底能不能跑 Android 容器」，
+# 目的：在 NAS 上花 10 秒判断「这台机器能用哪条路线跑 Android 侧车」，
 #      避免在注定失败的平台上折腾内核模块。
+#
+# 两条互不依赖的通道（只需要通一条）：
+#   A. redroid（容器化 Android）  —— 共享宿主内核，门槛 = binder
+#   B. QEMU 虚拟机（真模拟器）    —— 自带 Android 内核，门槛 = KVM
+# B 的意义：群晖 / 威联通官方内核不给 binder，A 直接死，但 B 照样能跑。
 #
 # 用法（NAS 上以 root 执行）：
 #   sudo bash sidecar/android/preflight.sh
 #
 # 检测项与真实门槛（不是"建议"，是硬性条件）：
-#   1. binder  —— Android 的 IPC 驱动。宿主机内核没有
+#   1. binder  —— Android 的 IPC 驱动。走 A 路线时，宿主内核没有
 #                 CONFIG_ANDROID_BINDER_IPC 就起不来，且 redroid 无法自带
 #   2. arch    —— 加固包的 .so 只有 ARMv7 / AArch64，没有 x86 版本。
 #                 x86_64 宿主必须靠镜像自带的 Native Bridge（libndk / libhoudini）
-#                 就地翻译；qemu 全栈模拟仅作兜底。详见 X86-NAS.md
-#   3. KVM     —— 只在用 QEMU 全系统模拟（qemu-system-aarch64）时需要
+#                 就地翻译；qemu 全栈模拟仅作兜底。见 X86-NAS.md
+#   3. KVM     —— 走 B 路线的硬性门槛。binder 由 guest 内核提供，与宿主无关
 #   4. binfmt  —— 走 qemu-user 兜底路线时，内核要注册 qemu-aarch64 处理器
 #                 （Native Bridge 路线不需要，别多注册，否则会覆盖翻译层）
 #
-# 退出码：0 = 可以继续；1 = 有硬阻塞（看输出最后的「结论」）
+# 退出码：0 = 至少一条路线可行；1 = 两条都不通（看输出最后的「结论」）
 # ============================================================================
 set -u
 
@@ -33,6 +38,12 @@ head_() { printf '\n%s\n' "$1"; }
 
 BLOCKERS=0
 WARNINGS=0
+# 两条互不依赖的技术通道，分开评估：
+#   REDROID_OK —— 容器化 Android，共享宿主内核，门槛是 binder
+#   QEMU_OK    —— 虚拟机里的 Android，自带内核，门槛是 KVM
+# 二者只需要一条通，所以「没 binder」不等于「这条路封死」。
+REDROID_OK=0
+QEMU_OK=0
 block() { bad "$1"; BLOCKERS=$((BLOCKERS + 1)); }
 soft()  { warn "$1"; WARNINGS=$((WARNINGS + 1)); }
 
@@ -134,9 +145,14 @@ if [ "$BINDER_OK" != 1 ] && [ "$IS_ROOT" = 1 ]; then
 fi
 
 if [ "$BINDER_OK" != 1 ]; then
-  block "binder 不可用 → redroid 起不来"
-  info "群晖 DSM / 威联通 QTS 默认内核普遍不含 binder，"
-  info "需要自编译签名模块，多数设备上不可行。"
+  bad "binder 不可用 → redroid（容器化 Android）这条路封死"
+  info "群晖 DSM / 威联通 QTS / 飞牛 fnOS 官方内核普遍不带 binder，"
+  info "自编签名模块在多数机型上不可行。"
+  info "但这【只】封死 redroid：下面【3】若检出 KVM，"
+  info "QEMU 虚拟机路线完全不受影响 —— binder 由 guest 的 Android 内核提供，"
+  info "与宿主内核无关。见 docker-compose.qemu-android.yml"
+else
+  REDROID_OK=1
 fi
 
 # ---------------------------------------------------------------- 2. ashmem
@@ -161,13 +177,30 @@ else
 fi
 
 # ---------------------------------------------------------------- 3. KVM
-head_ "【3】KVM（QEMU 全系统模拟时才需要）"
+head_ "【3】KVM（路线 B「虚拟机里的 Android」的生死线）"
+VCPUS="$(grep -c -E '^flags.*(vmx|svm)' /proc/cpuinfo 2>/dev/null)" || true
+VCPUS="${VCPUS:-0}"
 if [ -e /dev/kvm ]; then
-  ok "/dev/kvm 存在"
-  [ -r /dev/kvm ] && ok "当前用户可读 /dev/kvm" || soft "/dev/kvm 不可读，需要把容器用户加入 kvm 组"
+  ok "/dev/kvm 存在 → 可以跑硬件加速的 Android 虚拟机"
+  QEMU_OK=1
+  if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    ok "当前用户可读写 /dev/kvm"
+  else
+    soft "/dev/kvm 不可读写：容器要 --device /dev/kvm + privileged"
+  fi
 else
-  soft "无 /dev/kvm（BIOS 未开 VT-x/AMD-V，或 NAS 内核未启用）"
-  info "仅影响「qemu-system-aarch64 全系统模拟」，不影响 redroid 用户态模拟"
+  if [ "${VCPUS}" -gt 0 ] 2>/dev/null; then
+    soft "CPU 支持虚拟化（${VCPUS} 个核带 vmx/svm），但 /dev/kvm 没出来"
+    info "常见原因是 BIOS 里 VT-x/AMD-V 没开，或内核没加载 kvm 模块："
+    info "  lsmod | grep -E 'kvm_intel|kvm_amd'"
+    info "  sudo modprobe kvm_intel      # AMD 平台换成 kvm_amd"
+    info "群晖：装了 Virtual Machine Manager 就说明 KVM 可用，照它的配置抄"
+  else
+    bad "CPU 不支持硬件虚拟化 → 虚拟机路线也走不通"
+    info "部分低端 Atom / 赛扬不带 VT-x，BIOS 里也开不出来"
+  fi
+  info "（注意：没有 KVM 容器仍能起来，但会退化成 TCG 纯软件模拟，"
+  info " Android 冷启动 10~40 分钟，dex 调用数十秒，只够离线爬虫用）"
 fi
 
 # ---------------------------------------------------------------- 4. binfmt
@@ -226,10 +259,14 @@ fi
 
 # ---------------------------------------------------------------- 结论
 printf '\n%s\n' "════════════════════════════════════════════════════════"
-if [ "$BLOCKERS" -eq 0 ]; then
-  printf ' %s结论：无硬阻塞，可以继续（%d 个警告）%s\n' "$GRN" "$WARNINGS" "$RST"
+if [ "$BLOCKERS" -gt 0 ]; then
+  printf ' %s结论：%d 个全局阻塞（缺 docker 等），两条容器路线都不通%s\n' "$RED" "$BLOCKERS" "$RST"
+elif [ "$REDROID_OK" = 1 ]; then
+  printf ' %s结论：binder 可用 → 走 redroid（最省资源，%d 个警告）%s\n' "$GRN" "$WARNINGS" "$RST"
+elif [ "$QEMU_OK" = 1 ]; then
+  printf ' %s结论：无 binder 但有 KVM → 走 QEMU 虚拟机路线%s\n' "$YEL" "$RST"
 else
-  printf ' %s结论：%d 个硬阻塞，redroid 不可行%s\n' "$RED" "$BLOCKERS" "$RST"
+  printf ' %s结论：binder 与 KVM 都不具备，容器路线封闭%s\n' "$RED" "$RST"
 fi
 printf '%s\n' "════════════════════════════════════════════════════════"
 
@@ -240,16 +277,37 @@ EOF
 
 if [ "$BLOCKERS" -gt 0 ]; then
   cat <<EOF
-  ${RED}这台机器跑不了 redroid${RST}（原因见上）。加固源只能走：
-    1) 旧安卓手机 / TV 盒子 + Host APK  —— 成功率 100%，成本一台闲置设备
-    2) 换纯 CMS 采集源                    —— 浏览器原生可播，无需任何侧车
+  ${RED}容器路线缺前提${RST}（原因见上）。可选：
+    1) 装好 Docker（群晖「Container Manager」/ 威联通「Container Station」）后重跑本脚本
+    2) 旧安卓手机 / TV 盒子 + Host APK  —— 成功率 100%，成本一台闲置设备
 EOF
-else
+elif [ "$REDROID_OK" != 1 ] && [ "$QEMU_OK" = 1 ]; then
+  cat <<EOF
+  ${GRN}redroid 走不通，但 KVM 在 → 换「虚拟机里的 Android」，一样是 Docker，一条命令${RST}
+
+  这条路和 redroid 的本质区别：Android 带自己的内核，binder 由 guest 提供，
+  所以宿主内核有没有 binder_linux 这件事，跟它没关系。
+
+    docker compose -f sidecar/android/docker-compose.qemu-android.yml up -d
+    docker logs -f novatv-android-emu        # 等 "boot completed"，首次 2~5 分钟
+    ADB_PORT=15555 bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
+
+  ${YEL}这条路自己的不确定点只有一个：ARM 翻译${RST}
+  加固包的 .so 只有 ARM 版，x86_64 的 Android 必须有 libndk_translation 才装得上。
+  装完先验这一步（脚本第 4 步如果报 NO_MATCHING_ABIS 就是这里的问题）：
+
+    adb -s 127.0.0.1:15555 shell dumpsys package novatv.host | grep -i abi
+    期望 primaryCpuAbi=arm64-v8a；若是 x86_64 或装不上，换 Play Store 版 system image
+
+  ${DIM}资源要求：至少 2 核 4GB 分给它，且 BIOS 的 VT-x 必须真的开着。${RST}
+EOF
+elif [ "$REDROID_OK" = 1 ]; then
   case "$ARCH" in
     arm64)
       cat <<EOF
   ${GRN}宿主是 ARM64，与加固包的 AArch64 库同架构 —— 最理想的情况${RST}
     docker compose -f sidecar/android/docker-compose.redroid.yml up -d
+    ADB_PORT=15555 bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
 EOF
       ;;
     x86_64)
@@ -260,18 +318,19 @@ EOF
        x86 的 redroid 有自带 libndk_translation / libhoudini 的镜像，
        装 arm64 APK 时由系统把 arm 指令就地翻译，不需要 qemu 全栈模拟：
        docker compose -f sidecar/android/docker-compose.redroid-x86.yml up -d
-       装完必须确认走了翻译：adb shell dumpsys package novatv.host | grep -i abi
+       ADB_PORT=15555 bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
+       装完必须确认走了翻译：adb -s 127.0.0.1:15555 shell dumpsys package novatv.host | grep -i abi
        应显示 primaryCpuAbi=arm64-v8a；若显示 x86_64 或报 NO_MATCHING_ABIS，
        说明该镜像不带翻译层，换 erstt/redroid:*_houdini_* tag。
        详见 sidecar/android/X86-NAS.md
 
-  ${YEL}2) QEMU 用户态模拟（能跑但很慢，仅作兜底）${RST}
-       docker run --privileged --rm tonistiigi/binfmt --install arm64
-       docker compose -f sidecar/android/docker-compose.redroid.yml up -d
-       心理预期：ART + 加固壳启动 5~15 分钟，单次 spider 调用可能数十秒。
+  ${YEL}2) QEMU 虚拟机（第二条独立通道，redroid 失败时的备份方案）${RST}
+       docker compose -f sidecar/android/docker-compose.qemu-android.yml up -d
+       只要有 /dev/kvm 就能跑，不依赖 binder；
+       代价是镜像数 GB、内存要 4G，比 redroid 重。
 
   ${DIM}注意：Native Bridge 同样要求内核有 binder_linux 与 binfmt_misc；
-        群晖 DSM / 威联通 QTS 基本无解。${RST}
+        群晖 DSM / 威联通 QTS 基本无解，那种机器直接看上面第 2 条。${RST}
   ${DIM}成功率最高仍是：一台旧安卓手机 / TV 盒子，100%。${RST}
 EOF
       ;;
@@ -281,6 +340,12 @@ EOF
 EOF
       ;;
   esac
+else
+  cat <<EOF
+  ${RED}binder 与 KVM 都不具备，容器路线到此为止${RST}。加固源只能走：
+    1) 旧安卓手机 / TV 盒子 + Host APK  —— 成功率 100%，成本一台闲置设备
+    2) 换纯 CMS 采集源                    —— 浏览器原生可播，无需任何侧车
+EOF
 fi
 
 cat <<EOF
@@ -289,4 +354,8 @@ cat <<EOF
 
 EOF
 
-exit $([ "$BLOCKERS" -eq 0 ] && echo 0 || echo 1)
+# 退出码语义：0 = 至少有一条容器路线可行；1 = 两条都不通
+if [ "$BLOCKERS" -gt 0 ] || { [ "$REDROID_OK" != 1 ] && [ "$QEMU_OK" != 1 ]; }; then
+  exit 1
+fi
+exit 0

@@ -1,0 +1,114 @@
+# ============================================================================
+# NovaTV · Android 侧车 —— 路线 B：QEMU 硬加速虚拟机（真模拟器）
+#
+# 和 docker-compose.redroid-*.yml 的区别，一句话：
+#   redroid 是「容器化 Android」——共享 NAS 的内核，必须有 binder 模块；
+#   本文件是「虚拟机里的 Android」——自带 Android 内核，**不需要宿主 binder**。
+#
+# 这就是它的价值：群晖 DSM / 威联通 QTS / 飞牛 fnOS 官方内核普遍不带 binder，
+# redroid 在那些机器上直接判死；但只要 BIOS 开了 VT-x 且有 /dev/kvm，
+# 这条路照样走得通，因为 binder 是 guest 内核提供的，跟宿主内核无关。
+#
+# ---------------------------------------------------------------------------
+# 前置（硬性，缺一不可）
+# ---------------------------------------------------------------------------
+#   1) /dev/kvm 存在且可读写
+#        ls -l /dev/kvm
+#        grep -c -E 'vmx|svm' /proc/cpuinfo     # ≥1 才说明 CPU 虚拟化开着
+#      没有的话：进 NAS 的 BIOS 打开 Intel VT-x / AMD-V，并确认内核加载了 kvm 模块
+#        lsmod | grep -E 'kvm_intel|kvm_amd'
+#
+#   2) 容器被允许使用 privileged（模拟器要改网络栈、挂载 KVM 设备）
+#      群晖 Container Manager / 威联通 Container Station 都支持，但要显式勾选
+#
+#   3) 至少 2 核 4GB 分给这个容器
+#
+#   没有 KVM 时容器仍能启动，但会退化成 TCG 纯软件模拟：
+#   Android 冷启动 10~40 分钟，dex 调用几十秒起步。当离线爬虫能用，当日常不行。
+#   所以「有没有 /dev/kvm」是这条路唯一的分水岭，先跑 preflight.sh 确认。
+#
+# ---------------------------------------------------------------------------
+# 为什么这个镜像（budtmo/docker-android）
+# ---------------------------------------------------------------------------
+#   它是 Google 官方 Android Emulator 的容器封装，官方 x86_64 AVD + adb + noVNC。
+#   相比自己拿 QEMU 装 Android-x86 ISO：
+#     - 不用交互式安装，一条 compose 起来
+#     - adb 是原生支持的（Android-x86 要手动 setprop service.adb.tcp.port）
+#     - 有 REST API 可以无人值守启动 / 停止
+#
+#   代价是它原本是给 Appium CI 测试用的，默认带一堆测试框架，镜像偏大（数 GB）。
+#
+# ---------------------------------------------------------------------------
+# 本方案最大的不确定点：ARM 指令谁来翻译
+# ---------------------------------------------------------------------------
+#   加固包的 native 库只有 ARM 版本：
+#     ftyguard_v7.so = ELF32 ARMv7      ftyguard_v8.so = ELF64 AArch64
+#   x86_64 的 AVD 里必须有 ARM translation 才能装：
+#     - Google APIs / Play Store 的 x86_64 system image（API 30+）通常带 libndk_translation
+#     - 纯 AOSP 的 x86_64 image 不带，装的时候会 INSTALL_FAILED_NO_MATCHING_ABIS
+#   所以下面默认用 emulator_11.0（API 30 + Google APIs 系），装完必须验证 ABI：
+#
+#     adb -s 127.0.0.1:15555 shell dumpsys package novatv.host | grep -i abi
+#       primaryCpuAbi=arm64-v8a  → 走翻译层，OK
+#       primaryCpuAbi=x86_64     → 没有翻译层，换 -google_apis_playstore tag
+#
+# ---------------------------------------------------------------------------
+# 启动
+# ---------------------------------------------------------------------------
+#   docker compose -f sidecar/android/docker-compose.qemu-android.yml up -d
+#   docker logs -f novatv-android-emu          # 等到 "emulator started" 或 boot completed
+#
+#   # 装侧车（注意端口是 15555，不是 5555）
+#   ADB_PORT=15555 bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
+#
+#   脚本会自动做 `adb forward tcp:8899 tcp:8899`，
+#   所以宿主侧直接 curl http://127.0.0.1:8899/health 就能通，
+#   不用管 guest 的 NAT IP（10.0.2.15）——那是宿主访问不到的。
+# ============================================================================
+
+services:
+  android-emulator:
+    image: budtmo/docker-android:emulator_11.0
+    container_name: novatv-android-emu
+    restart: unless-stopped
+
+    # KVM 是全部意义所在；没有它就别用这份编排，改用 redroid
+    devices:
+      - /dev/kvm:/dev/kvm
+    privileged: true
+
+    ports:
+      # 宿主 15555 → 容器 5555
+      # 必须错开 5555：宿主自己的 adb server 默认就占 5555，映射成 5555:5555 会让
+      # adb 把宿主机误认成一个永远 offline 的 emulator-5554，之后就再也连不上。
+      - "15555:5555"
+      # noVNC 页面：只在需要肉眼看一眼的时候用，日常可以关掉
+      - "6081:6080"
+
+    volumes:
+      # 持久化 /data，避免每次重启都要重装 APK（镜像默认每次清空 AVD）
+      - ./data-qemu:/home/androidusr
+
+    environment:
+      TZ: Asia/Shanghai
+      # 设备档位：给侧车用不需要好屏幕，选个内存占用小的
+      EMULATOR_DEVICE: "Samsung Galaxy S10"
+      # 侧车不渲染画面，只要 adb + dex 执行，所以把这些全关掉
+      EMULATOR_NO_SKIN: "true"
+      EMULATOR_ADDITIONAL_ARGS: "-no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot"
+      EMULATOR_DATA_PARTITION: "2048m"
+      # 关掉 Appium / Web VNC 的自动拉起，少两个后台进程
+      WEB_VNC: "true"
+      APPIUM: "false"
+
+    deploy:
+      resources:
+        limits:
+          # Android 11 冷启动 + ART 编译，2G 会 OOM
+          memory: 4G
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"

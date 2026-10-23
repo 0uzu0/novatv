@@ -119,12 +119,13 @@ node scripts/jvm-sidecar.mjs        # javac 编译 + 打 demo jar + 起 8899
 
 已备好：
 
-- `sidecar/android/preflight.sh`：宿主可行性预检（binder/ashmem/KVM/binfmt/privileged），10 秒给结论
-- `sidecar/android/docker-compose.redroid.yml`：redroid 容器（含 `platform: linux/arm64` 与 binderfs 挂载）
+- `sidecar/android/preflight.sh`：宿主可行性预检（binder/KVM/binfmt/privileged），10 秒判定该走哪条路线
+- `sidecar/android/docker-compose.redroid.yml`：路线 A，redroid 容器（共享宿主内核，需 binder）
+- `sidecar/android/docker-compose.qemu-android.yml`：路线 B，KVM 虚拟机里的 Android（自带内核，不依赖宿主 binder，群晖/威联通可用）
 - `sidecar/android/host-apk/`：`HostService.java`（手写 HTTP + DexClassLoader + 反射调用）、Manifest、gradle 工程
 - `scripts/extract-spider-libs.mjs`：从加固包抽 `.so` → `jniLibs/<abi>/`（按 ELF header 判 ABI，不靠文件名）
 - `.github/workflows/android.yml`：CI 自动构建 APK（先抽 `.so` 再 `assembleDebug`），产物走 Artifacts
-- `sidecar/android/README.md`：完整 runbook（三种部署形态 + 排障表）
+- `sidecar/android/README.md`：完整 runbook（四种部署形态 + 排障表）
 
 四个必须知道的坑：
 

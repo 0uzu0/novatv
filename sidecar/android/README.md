@@ -34,23 +34,37 @@ Host APK（手机 / TV 盒子 / redroid 里的 ART）
 浏览器永远拿不到也不需要字节码：它只收到标准化 JSON 和一个 `/api/proxy?url=...` 的播放地址。
 所以「加固源不能网页播」是个伪命题 —— 缺的不是播放能力，而是**一个把 spider 翻译成 HTTP 的执行体**。
 
-## 三种部署形态
+## 四种部署形态
 
 | 形态 | 适合 | 代价 |
 |---|---|---|
 | **A. 旧手机（推荐）** | 家里有闲置 Android 7+ 手机/平板/TV 盒子 | 手机要常插电、关省电限制 |
 | **B. 真机 + adb** | 手机和 NAS 不同网段，或只想临时跑 | 必须连着电脑/NAS 的 adb |
-| **C. redroid 容器** | 不想用手机，NAS 是 x86_64 自建 Linux | 加固包只有 ARM 的 `.so`，必须走 Native Bridge |
+| **C. redroid 容器** | NAS 是自建 Linux（Debian/Unraid/TrueNAS），内核有 binder | 加固包只有 ARM 的 `.so`，必须走 Native Bridge |
+| **D. QEMU 虚拟机** | NAS 是群晖/威联通/飞牛，内核**没有** binder 但有 KVM | 内存 4 GB、镜像数 GB，比 C 重 |
 
-> **NAS 是 Intel / AMD（x86_64）？** 看 [`X86-NAS.md`](X86-NAS.md) —— 那是唯一的容器路线手册，
+> C 和 D 都是「Docker 里跑 Android」，但门槛完全不同：
+> **C 共享宿主内核，必须有 `binder_linux`；D 自带 Android 内核，只要 `/dev/kvm`。**
+> 群晖 DSM、威联通 QTS、飞牛 fnOS 的官方内核普遍不带 binder，那些机器只能走 D。
+>
+> **NAS 是 Intel / AMD（x86_64）？** 看 [`X86-NAS.md`](X86-NAS.md) —— 两条路线的手册都在里面，
 > 含 30 秒可行性判定、五步操作、`/health` 判据、失败对照表，以及**明确的止损线**。
+>
+> 先跑预检，它会直接告诉你该走哪条：
+>
+> ```bash
+> sudo bash sidecar/android/preflight.sh
+> ```
 >
 > 设备和容器都准备好之后，安装与启动统一用一键脚本（与架构无关）：
 >
 > ```bash
-> bash install-apk.sh 127.0.0.1 novatv123   # redroid 容器直连
-> bash install-apk.sh 192.168.1.50 novatv123 # 手机 / TV 盒子
+> ADB_PORT=15555 bash install-apk.sh 127.0.0.1 novatv123  # redroid / QEMU 容器
+> bash install-apk.sh 192.168.1.50 novatv123              # 手机 / TV 盒子
 > ```
+>
+> 容器形态的 ADB 端口一律 **15555**：宿主 adb server 自己占着 5555，
+> 映射成 `5555:5555` 会让 adb 把宿主认成永远 offline 的 `emulator-5554`。
 
 ### 形态 A：手机直连（不用电脑，推荐）
 
@@ -103,11 +117,11 @@ mkdir -p /dev/binderfs && sudo mount -t binder binder /dev/binderfs
 
 # x86_64（Intel / AMD）→ 用自带 Native Bridge 的镜像，不要额外注册 binfmt arm64
 docker compose -f sidecar/android/docker-compose.redroid-x86.yml up -d
-bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
+ADB_PORT=15555 bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
 
 # ARM64 → 通用编排
 docker compose -f sidecar/android/docker-compose.redroid.yml up -d
-bash sidecar/android/install-apk.sh <容器IP> novatv123
+ADB_PORT=15555 bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
 ```
 
 关于 x86_64 宿主，必须把预期说清楚：
@@ -125,8 +139,37 @@ x86 宿主要么让镜像自带翻译层就地翻译，要么让容器以 arm64 
 **x86_64 的完整操作、判据与止损线见 [`X86-NAS.md`](X86-NAS.md)**——那份文档包含
 「30 秒可行性判定 / 五步操作 / `/health` 的唯一判据 / 失败特征对照 / 何时该停手」。
 
-> 加固壳还可能校验 ABI、模拟器特征、签名。**redroid 的成功率天然低于真机**，
+> 加固壳还可能校验 ABI、模拟器特征、签名。**容器（C 和 D）的成功率天然低于真机**，
 > 遇到壳直接退出属于预期内，不是配置错了。
+
+### 形态 D：QEMU 虚拟机（群晖 / 威联通 这类没有 binder 的 NAS）
+
+形态 C 在群晖 DSM、威联通 QTS、飞牛 fnOS 上必然失败：它们的官方内核不编译 binder 模块，
+而 redroid 是共享宿主内核的容器，没有 binder 就起不来。
+
+形态 D 绕开这个死结 —— 它跑的是**虚拟机**里的 Android，binder 由 guest 自带的 Android 内核提供，
+跟宿主内核有没有 binder 完全无关。代价是必须有一个 `/dev/kvm`（BIOS 里开 VT-x）。
+
+```bash
+# 0) 确认 KVM 可用（这是唯一前置）
+ls -l /dev/kvm
+lsmod | grep -E 'kvm_intel|kvm_amd'
+
+# 1) 起虚拟机（首次 boot 2~5 分钟）
+docker compose -f sidecar/android/docker-compose.qemu-android.yml up -d
+docker logs -f novatv-android-emu
+
+# 2) 装侧车。端口是 15555；脚本会自动 adb forward 打通 8899，
+#    不用管 QEMU guest 的 10.0.2.15（宿主路由不到）
+ADB_PORT=15555 bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
+
+# 3) 确认 ARM 翻译层生效（本路线唯一的不确定点）
+adb -s 127.0.0.1:15555 shell dumpsys package novatv.host | grep -i abi
+#   primaryCpuAbi=arm64-v8a   ✅
+#   INSTALL_FAILED_NO_MATCHING_ABIS → AVD 不带 ARM 翻译，换 Play Store 版 system image
+```
+
+详细判定与失败对照见 [`X86-NAS.md`](X86-NAS.md) 第六节。
 
 ### 构建 APK
 

@@ -57,8 +57,12 @@ services:
     privileged: true
 
     ports:
-      # adb：装 APK、看 logcat 都靠它
-      - "5555:5555"
+      # adb：装 APK、看 logcat 都靠它。宿主 15555 → 容器 5555。
+      # 必须错开 5555：宿主 adb server 默认占 5555，直接映射会变成 offline 的
+      # emulator-5554 幽灵设备。
+      - "15555:5555"
+      # 侧车 HTTP：主服务访问 /health、/spider 用
+      - "8899:8899"
 
     volumes:
       # Android 的 /data 必须持久化，否则每次重启 APK 都要重装
@@ -85,7 +89,8 @@ services:
     # 故意不写 healthcheck：
     #   redroid 里是 AOSP 的 toybox sh，没有 bash，也就不支持 /dev/tcp 探测，
     #   写了只会让容器永远 unhealthy。启动是否成功请从宿主侧确认：
-    #     adb connect <NAS_IP>:5555 && adb devices
+    #     ADB_PORT=15555 bash sidecar/android/install-apk.sh 127.0.0.1 novatv123
+    #   脚本会先 adb forward，再拉 /health —— 不依赖端口映射也能验。
     #   QEMU 转译下首次启动 5~15 分钟才有 adb，别急着判定失败。
 
     # redroid 内部没有 init 之外的进程管理，oom 时别拖垮宿主
