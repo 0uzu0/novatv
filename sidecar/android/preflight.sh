@@ -186,7 +186,27 @@ if [ -e /dev/kvm ]; then
   if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ok "当前用户可读写 /dev/kvm"
   else
-    soft "/dev/kvm 不可读写：容器要 --device /dev/kvm + privileged"
+    soft "当前 shell 用户读不了 /dev/kvm（需 root 或在 kvm 组）"
+  fi
+
+  # /dev/kvm 默认是 root:kvm 660。容器里的模拟器进程常以非 root 用户跑，
+  # 只加 --device 会把「属主 root、权限 660」原样带进容器，非 root 用户照样打不开，
+  # 报 permission denied —— 这一步没配好，会被误判成「KVM 没开」。
+  KVM_GID="$(stat -c '%g' /dev/kvm 2>/dev/null || echo '')"
+  KVM_GRP="$(stat -c '%G' /dev/kvm 2>/dev/null || echo 'kvm')"
+  if [ -n "$KVM_GID" ]; then
+    POSIX_PERM="$(stat -c '%a' /dev/kvm 2>/dev/null || echo '')"
+    info "设备节点: ${KVM_GRP} 组, gid=${KVM_GID}, 权限=${POSIX_PERM}"
+    case "$POSIX_PERM" in
+      66[06]|*7*)
+        ok "组内可读写，容器里加 group_add 即可"
+        info "编排里补一行（本次已在 compose 中预留注释）："
+        info "  group_add: [\"${KVM_GID}\"]"
+        ;;
+      *)
+        soft "权限位 ${POSIX_PERM} 异常，容器内可能打不开"
+        ;;
+    esac
   fi
 else
   if [ "${VCPUS}" -gt 0 ] 2>/dev/null; then

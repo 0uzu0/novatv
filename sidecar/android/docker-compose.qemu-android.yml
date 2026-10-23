@@ -75,6 +75,19 @@ services:
     # KVM 是全部意义所在；没有它就别用这份编排，改用 redroid
     devices:
       - /dev/kvm:/dev/kvm
+
+    # /dev/kvm 是 root:kvm 660。只写上面那行 --device，会把「属主 root、
+    # 权限 660」原样带进容器；容器里的模拟器进程不是 root（androidusr），
+    # 于是照样打不开，报 permission denied —— 这个报错特别容易被误读成
+    # 「KVM 没开」。所以要把宿主的 kvm 组 gid 映射进来：
+    #
+    #   stat -c '%g' /dev/kvm        # 先查，各发行版不一样
+    #
+    # 常见值：Debian/Ubuntu 108、Arch 78、部分 NAS 系统 1000+。
+    # 填错不会把容器搞崩，只是继续 permission denied，所以务必先查。
+    # group_add:
+    #   - "108"
+
     privileged: true
 
     ports:

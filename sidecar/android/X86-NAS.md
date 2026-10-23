@@ -151,6 +151,25 @@ lsmod | grep -E 'kvm_intel|kvm_amd'  # 模块已加载
 三样缺任何一样都进 BIOS 打开 Intel VT-x / AMD-V 再回来。
 群晖装了 Virtual Machine Manager 就说明 KVM 可用 —— 它本身就是 KVM。
 
+**但 `ls -l /dev/kvm` 有输出只是第一步**，注意它的权限位：
+
+```
+crw-rw---- 1 root kvm 10, 232 ...
+```
+
+`660` + `root:kvm` 意味着**只有 root 和 kvm 组成员能打开这个设备**。
+容器里跑模拟器的是非 root 用户（`androidusr`），`--device /dev/kvm` 只是把
+「属主 root、权限 660」原样搬进容器，并不会放宽它。结果就是
+`permission denied /dev/kvm` —— 而这个报错极易被误读成「KVM 没开」。
+
+解法是把宿主的 kvm 组 gid 映射进容器：
+
+```bash
+stat -c '%g' /dev/kvm     # 先查实际 gid（Debian/Ubuntu 常见 108，Arch 78，有的 NAS 是 1000+）
+```
+
+然后把 compose 里注释掉的 `group_add` 打开并填这个数字。
+
 ### 6.2 起容器
 
 ```bash
@@ -202,8 +221,9 @@ Google APIs / Play Store 的 x86_64 镜像（API 30+）通常带翻译层，纯 
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 容器起不来，日志报 `permission denied /dev/kvm` | 没给 `--device /dev/kvm` 或没 privileged | 检查 compose 的 devices 段 |
-| 启动超过 15 分钟还没 boot | 实际走了 TCG 软件模拟（KVM 没生效） | 回 6.1 确认 VT-x 与 kvm 模块 |
+| 容器起不来，日志报 `permission denied /dev/kvm` | 没给 `--device /dev/kvm`，**或给了但容器内非 root 用户读不了 660 的节点** | 检查 devices 段；再按 6.1 查 gid 打开 `group_add` |
+| 日志报 `KVM is not found` / `no acceleration` | 同上，实际退回了 TCG | 同上，别急着以为 BIOS 没开 |
+| 启动超过 15 分钟还没 boot | 实际走了 TCG 软件模拟（KVM 没生效） | 回 6.1 确认 VT-x、kvm 模块与组权限 |
 | `INSTALL_FAILED_NO_MATCHING_ABIS` | AVD 无 ARM 翻译 | 换 Play Store 镜像，或回路线 A |
 | 装上了但 `/health` 的 `initErrors` 有 dlopen 失败 | 翻译层跑不动 native 校验码 | 与 A 路线同因，换镜像再试一次 |
 | 内存 OOM，宿主被拖垮 | 4 GB 上限不够 | 调到 6 GB，或减少并发调用 |
